@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Brahmavidya Path Checker</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Inter:wght@400;500;600;700&family=Noto+Sans+Gujarati:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+
+  <body>
+    <div class="brand-bar">
+      BAPS Swaminarayan Sanstha &middot; Brahmavidya Records
+    </div>
+
+    <div class="page">
+      <div class="crest">
+        <div class="crest">
+        <img 
+          class="hero-photo" 
+          src="static/Bapa_Writing.jpg" 
+          alt="Swami writing on a tablet" 
+        />
+        <h1>Brahmavidya Path Checker</h1>
+        <div class="gujarati">બ્રહ્મવિદ્યાનો પાઠ</div>
+        <p class="tagline">
+          Enter a Brahmavidya Path below to check it against the existing
+          records and keep every entry distinct and consistent.
+        </p>
+      </div>
+
+      <div class="patra">
+        <div class="patra-inner">
+          <label class="field-label" for="pathInput">
+            Brahmavidya Path
+            <span class="sub"
+              >Type or paste the path in Gujarati</span
+            >
+          </label>
+
+          <textarea
+            id="pathInput"
+            rows="5"
+            placeholder="બ્રહ્મવિદ્યાનો પાઠ લખો..."
+          ></textarea>
+
+          <div class="actions">
+
+            <button
+                class="btn-check"
+                id="checkBtn"
+                onclick="checkPath()">
+                Check Path
+            </button>
+
+            <button
+                class="btn-add"
+                id="addBtn"
+                onclick="addPath()">
+                Add Path
+            </button>
+            <!-- <span class="hint">
+                Matches are ranked by highest word overlap
+            </span> -->
+            </div>
+
+          <div class="divider">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="12" cy="12" r="4" />
+            </svg>
+          </div>
+
+          <div id="result">
+            <div class="empty-state empty-state-initial">
+              <div class="glyph">&#9670;</div>
+              Enter a path above and select
+              <span class="cta-hint">Check Path</span> to see matching records.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <footer class="page-footer">
+        Brahmavidya Path Records &middot; Internal Reference Tool
+      </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
