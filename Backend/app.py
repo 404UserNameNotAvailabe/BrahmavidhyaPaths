@@ -87,18 +87,23 @@ async def list_archive(
     q: str | None = None,
     category: str | None = None,
     tag: str | None = None,
+    source: str | None = None,
+    favorite: bool = False,
     uncategorized: bool = False,
     untagged: bool = False,
     order: str = "desc",
-    limit: int = 500,
+    limit: int = 25,
+    offset: int = 0,
 ):
     """
-    Chronological ledger of archived messages for the Archive page.
+    Paginated ledger of archived messages for the Archive page.
     Filters: `year`, `q` (text search), `category`, `tag`, `uncategorized`,
-    `untagged`. `order` = "asc" | "desc" by date. Each entry carries a
-    `pending` flag (embedding not yet computed).
+    `untagged`. `order` = "asc" | "desc" by date. Returns `total` (filtered
+    count, for pagination) and `years` (all distinct years, for the picker).
+    Each entry carries a `pending` flag (embedding not yet computed).
     """
-    limit = max(1, min(limit, 1000))
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
     direction = "ASC" if order.lower() == "asc" else "DESC"
 
     clauses = []
@@ -115,6 +120,11 @@ async def list_archive(
     if tag:
         clauses.append("%s = ANY(tags)")
         params.append(tag.strip())
+    if source:
+        clauses.append("source = %s")
+        params.append(source.strip())
+    if favorite:
+        clauses.append("is_favorite")
     if uncategorized:
         clauses.append("category IS NULL")
     if untagged:
@@ -124,20 +134,33 @@ async def list_archive(
 
     try:
         with db_cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM messages {where}", params)
+            total = cur.fetchone()[0]
+
             cur.execute(
                 f"""
                 SELECT id, message_text, message_date, year, category, tags,
-                       (embedding IS NULL) AS pending
+                       (embedding IS NULL) AS pending, source, is_favorite
                 FROM messages
                 {where}
                 ORDER BY message_date {direction} NULLS LAST, id {direction}
-                LIMIT {limit}
+                LIMIT %s OFFSET %s
                 """,
-                params,
+                params + [limit, offset],
             )
             rows = cur.fetchall()
+
+            # All distinct years (independent of filters / page) for the picker.
+            cur.execute(
+                "SELECT DISTINCT year FROM messages WHERE year IS NOT NULL ORDER BY year DESC"
+            )
+            years = [r[0] for r in cur.fetchall()]
     except Exception as exc:
-        return {"status": "error", "message": str(exc), "data": {"entries": []}}
+        return {
+            "status": "error",
+            "message": str(exc),
+            "data": {"entries": [], "years": [], "total": 0},
+        }
 
     entries = [
         {
@@ -148,27 +171,31 @@ async def list_archive(
             "category": r[4] or "",
             "tags": r[5] or [],
             "pending": bool(r[6]),
+            "source": r[7] or "",
+            "is_favorite": bool(r[8]),
         }
         for r in rows
     ]
 
-    years = sorted({e["year"] for e in entries if e["year"] is not None}, reverse=True)
-
-    return {"status": "success", "data": {"entries": entries, "years": years}}
+    return {"status": "success", "data": {"entries": entries, "years": years, "total": total}}
 
 
 @app.post("/check")
-async def check_path(payload: CheckRequest):
+async def check_path(payload: CheckRequest, semantic: bool = False):
     """
-    Find archive entries that overlap the proposed message, ranked by a
-    hybrid confidence score (semantic + trigram + token overlap).
+    Find archive entries that overlap the proposed message.
+
+    Default (fast, sub-second): trigram + word-overlap on normalized text.
+    semantic=true: also embeds the query via Gemini for meaning-level matches.
+    The embedding is a network round-trip (~0.5s warm), so it is opt-in to keep
+    the everyday check instant.
     """
     query = payload.text.strip()
     query_norm = matching.normalize_text(query)
     query_tokens = matching.tokenize(query)
 
-    # Semantic query vector (None when embeddings are disabled / fail).
-    qvec = embeddings.to_pgvector(embeddings.embed_query(query))
+    # Semantic adds a Gemini embedding call — opt-in so the default stays fast.
+    qvec = embeddings.to_pgvector(embeddings.embed_query(query)) if semantic else None
 
     if qvec is not None:
         sem_expr = "1 - (embedding <=> %(qvec)s::vector)"
@@ -245,6 +272,7 @@ async def add_path(payload: AddRequest):
     """
     message_text = payload.text.strip()
     tags = taxonomy.clean_tags(payload.tags)
+    source = (payload.source or "").strip() or taxonomy.extract_source(message_text)
     embedding = embeddings.to_pgvector(embeddings.embed_document(message_text))
 
     try:
@@ -253,9 +281,9 @@ async def add_path(payload: AddRequest):
             cur.execute(
                 """
                 INSERT INTO messages
-                    (message_text, message_date, category, tags, embedding)
+                    (message_text, message_date, category, tags, source, embedding)
                 VALUES
-                    (%s, %s, %s, %s, %s::vector)
+                    (%s, %s, %s, %s, %s, %s::vector)
                 ON CONFLICT (normalized_text) DO NOTHING
                 RETURNING id
                 """,
@@ -264,6 +292,7 @@ async def add_path(payload: AddRequest):
                     payload.message_date,
                     category,
                     tags,
+                    source,
                     embedding,
                 ),
             )
@@ -313,6 +342,14 @@ async def update_message(message_id: int, payload: UpdateRequest):
                 sets.append("tags = %s")
                 params.append(taxonomy.clean_tags(payload.tags))
 
+            if "source" in provided:
+                sets.append("source = %s")
+                params.append((payload.source or "").strip() or None)
+
+            if "is_favorite" in provided:
+                sets.append("is_favorite = %s")
+                params.append(bool(payload.is_favorite))
+
             if not sets:
                 return {"status": "error", "message": "No fields to update"}
 
@@ -360,14 +397,15 @@ async def import_messages(payload: ImportRequest):
             text = row.message.strip()
             try:
                 category = taxonomy.ensure_category(cur, row.category)
+                source = (row.source or "").strip() or taxonomy.extract_source(text)
                 cur.execute(
                     """
-                    INSERT INTO messages (message_text, message_date, category, tags)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO messages (message_text, message_date, category, tags, source)
+                    VALUES (%s, %s, %s, %s, %s)
                     ON CONFLICT (normalized_text) DO NOTHING
                     RETURNING id
                     """,
-                    (text, row.message_date, category, taxonomy.clean_tags(row.tags)),
+                    (text, row.message_date, category, taxonomy.clean_tags(row.tags), source),
                 )
                 if cur.fetchone() is None:
                     skipped += 1
@@ -493,3 +531,137 @@ async def list_tags():
         "status": "success",
         "data": {"tags": [{"name": r[0], "count": r[1]} for r in rows]},
     }
+
+
+@app.get("/sources")
+async def list_sources():
+    """Distinct speaker/source attributions in use, most-used first."""
+    try:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT source, count(*) AS uses
+                FROM messages
+                WHERE source IS NOT NULL AND btrim(source) <> ''
+                GROUP BY source
+                ORDER BY uses DESC, source
+                """
+            )
+            rows = cur.fetchall()
+    except Exception as exc:
+        return {"status": "error", "message": str(exc), "data": {"sources": []}}
+
+    return {
+        "status": "success",
+        "data": {"sources": [{"name": r[0], "count": r[1]} for r in rows]},
+    }
+
+
+# --- Archive insights -----------------------------------------------------
+
+
+@app.get("/overview")
+async def overview():
+    """Headline stats for the archive: total, date span, per-year counts."""
+    try:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*), min(message_date), max(message_date),
+                       count(*) FILTER (WHERE is_favorite)
+                FROM messages
+                """
+            )
+            total, earliest, latest, favorites = cur.fetchone()
+            cur.execute(
+                "SELECT year, count(*) FROM messages WHERE year IS NOT NULL "
+                "GROUP BY year ORDER BY year"
+            )
+            per_year = [{"year": r[0], "count": r[1]} for r in cur.fetchall()]
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+    return {
+        "status": "success",
+        "data": {
+            "total": total,
+            "earliest": earliest.isoformat() if earliest else None,
+            "latest": latest.isoformat() if latest else None,
+            "favorites": favorites,
+            "per_year": per_year,
+        },
+    }
+
+
+@app.get("/onthisday")
+async def on_this_day():
+    """Vachans given on today's month+day in past years."""
+    try:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, message_text, message_date, year, source
+                FROM messages
+                WHERE message_date IS NOT NULL
+                  AND extract(month FROM message_date) = extract(month FROM CURRENT_DATE)
+                  AND extract(day   FROM message_date) = extract(day   FROM CURRENT_DATE)
+                ORDER BY message_date DESC
+                """
+            )
+            rows = cur.fetchall()
+    except Exception as exc:
+        return {"status": "error", "message": str(exc), "data": {"entries": []}}
+
+    return {
+        "status": "success",
+        "data": {
+            "entries": [
+                {
+                    "id": str(r[0]),
+                    "message": r[1],
+                    "date": r[2].isoformat() if r[2] else None,
+                    "year": r[3],
+                    "source": r[4] or "",
+                }
+                for r in rows
+            ]
+        },
+    }
+
+
+@app.get("/duplicates")
+async def duplicates(threshold: float = 0.55, limit: int = 50):
+    """
+    Near-duplicate vachan PAIRS already in the archive (trigram similarity),
+    so admins can merge/delete. O(n²) self-join — fine for a small corpus.
+    """
+    threshold = min(max(threshold, 0.3), 0.95)
+    limit = max(1, min(limit, 200))
+    try:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.id, a.message_text, a.message_date,
+                       b.id, b.message_text, b.message_date,
+                       similarity(a.normalized_text, b.normalized_text) AS sim
+                FROM messages a
+                JOIN messages b ON a.id < b.id
+                WHERE similarity(a.normalized_text, b.normalized_text) >= %s
+                ORDER BY sim DESC
+                LIMIT %s
+                """,
+                (threshold, limit),
+            )
+            rows = cur.fetchall()
+    except Exception as exc:
+        return {"status": "error", "message": str(exc), "data": {"pairs": []}}
+
+    pairs = [
+        {
+            "a": {"id": str(r[0]), "message": r[1], "date": r[2].isoformat() if r[2] else None},
+            "b": {"id": str(r[3]), "message": r[4], "date": r[5].isoformat() if r[5] else None},
+            "similarity": round(float(r[6]) * 100, 1),
+        }
+        for r in rows
+    ]
+    return {"status": "success", "data": {"pairs": pairs}}

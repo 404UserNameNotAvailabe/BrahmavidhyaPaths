@@ -31,10 +31,24 @@ CREATE TABLE IF NOT EXISTS messages (
     message_date    date,
     year            int GENERATED ALWAYS AS (extract(year FROM message_date)::int) STORED,
 
+    -- Dhanurmas season (start year). The season spans Dec→Jan across two
+    -- English years, so December belongs to that year's season and January
+    -- to the previous year's. e.g. Dec 2016 and Jan 2017 → season 2016.
+    season          int GENERATED ALWAYS AS (
+                        CASE WHEN extract(month FROM message_date) >= 7
+                             THEN extract(year FROM message_date)::int
+                             ELSE extract(year FROM message_date)::int - 1 END
+                    ) STORED,
+
     -- Archive categorization (editorial). One broad category + many free tags.
     -- category is a name from the managed `categories` list (app-enforced).
     category        text,
     tags            text[] NOT NULL DEFAULT '{}',
+
+    -- Who the vachan is attributed to (Shriji Maharaj, Pramukh Swami, …).
+    source          text,
+    -- Admin-starred important vachans.
+    is_favorite     boolean NOT NULL DEFAULT false,
 
     -- Gemini embedding; dimension must match EMBED_DIM (768).
     embedding       vector(768),
@@ -48,6 +62,13 @@ CREATE TABLE IF NOT EXISTS messages (
 -- (the app runs it on every startup to keep the DB in sync with the code).
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS category text;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS tags text[] NOT NULL DEFAULT '{}';
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS source text;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_favorite boolean NOT NULL DEFAULT false;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS season int GENERATED ALWAYS AS (
+    CASE WHEN extract(month FROM message_date) >= 7
+         THEN extract(year FROM message_date)::int
+         ELSE extract(year FROM message_date)::int - 1 END
+) STORED;
 
 -- No two messages with the same normalized text.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_messages_normalized
@@ -65,6 +86,9 @@ CREATE INDEX IF NOT EXISTS ix_messages_embedding_hnsw
 CREATE INDEX IF NOT EXISTS ix_messages_date ON messages (message_date DESC);
 CREATE INDEX IF NOT EXISTS ix_messages_category ON messages (category);
 CREATE INDEX IF NOT EXISTS ix_messages_tags ON messages USING gin (tags);
+CREATE INDEX IF NOT EXISTS ix_messages_source ON messages (source);
+CREATE INDEX IF NOT EXISTS ix_messages_favorite ON messages (is_favorite) WHERE is_favorite;
+CREATE INDEX IF NOT EXISTS ix_messages_season ON messages (season);
 
 -- Keep updated_at fresh on every UPDATE (e.g. embedding backfill).
 CREATE OR REPLACE FUNCTION set_updated_at() RETURNS trigger AS $$

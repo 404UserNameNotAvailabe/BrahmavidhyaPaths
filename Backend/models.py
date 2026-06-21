@@ -6,6 +6,7 @@ from pydantic import AliasChoices, BaseModel, Field
 CATEGORY_MAX = 80
 TAG_MAX = 60
 MAX_TAGS = 20
+SOURCE_MAX = 120
 
 
 class CheckRequest(BaseModel):
@@ -34,6 +35,7 @@ class AddRequest(BaseModel):
     # Editorial metadata: one broad category + free tags.
     category: str | None = Field(default=None, max_length=CATEGORY_MAX)
     tags: list[str] = Field(default_factory=list, max_length=MAX_TAGS)
+    source: str | None = Field(default=None, max_length=SOURCE_MAX)
 
     model_config = {"populate_by_name": True}
 
@@ -50,6 +52,8 @@ class UpdateRequest(BaseModel):
     # Empty string clears the category (stored as NULL).
     category: str | None = Field(default=None, max_length=CATEGORY_MAX)
     tags: list[str] | None = Field(default=None, max_length=MAX_TAGS)
+    source: str | None = Field(default=None, max_length=SOURCE_MAX)
+    is_favorite: bool | None = None
 
 
 class ImportRow(BaseModel):
@@ -62,6 +66,7 @@ class ImportRow(BaseModel):
     )
     category: str | None = Field(default=None, max_length=CATEGORY_MAX)
     tags: list[str] = Field(default_factory=list, max_length=MAX_TAGS)
+    source: str | None = Field(default=None, max_length=SOURCE_MAX)
 
     model_config = {"populate_by_name": True}
 
