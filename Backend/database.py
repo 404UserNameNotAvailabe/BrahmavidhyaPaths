@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 from psycopg.conninfo import make_conninfo
 from psycopg_pool import ConnectionPool
 
@@ -44,3 +46,20 @@ def get_connection():
 
 def return_connection(conn):
     pool.putconn(conn)
+
+
+@contextmanager
+def db_cursor():
+    """Borrow a pooled connection and yield a cursor, returning the connection
+    to the pool afterwards. The pool runs in autocommit, so each statement
+    commits on its own.
+
+        with db_cursor() as cur:
+            cur.execute(...)
+            rows = cur.fetchall()
+    """
+    conn = get_connection()
+    try:
+        yield conn.cursor()
+    finally:
+        return_connection(conn)

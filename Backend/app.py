@@ -13,7 +13,7 @@ import matching
 import taxonomy
 import worker
 from config import CORS_ORIGINS
-from database import close_pool, get_connection, return_connection
+from database import close_pool, db_cursor
 from models import (
     AddRequest,
     CategoryRequest,
@@ -39,17 +39,14 @@ def init_schema() -> None:
         logger.warning("Could not read schema.sql (%s) — skipping auto-init.", exc)
         return
 
-    conn = get_connection()
     try:
         # No parameters → psycopg uses the simple protocol, which runs the
         # whole multi-statement script in one call.
-        with conn.cursor() as cur:
+        with db_cursor() as cur:
             cur.execute(script)
         logger.info("Schema ensured.")
     except Exception as exc:
         logger.warning("Schema auto-init failed (%s) — continuing.", exc)
-    finally:
-        return_connection(conn)
 
 
 @asynccontextmanager
@@ -125,25 +122,22 @@ async def list_archive(
 
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
-    conn = get_connection()
     try:
-        cur = conn.cursor()
-        cur.execute(
-            f"""
-            SELECT id, message_text, message_date, year, category, tags,
-                   (embedding IS NULL) AS pending
-            FROM messages
-            {where}
-            ORDER BY message_date {direction} NULLS LAST, id {direction}
-            LIMIT {limit}
-            """,
-            params,
-        )
-        rows = cur.fetchall()
+        with db_cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, message_text, message_date, year, category, tags,
+                       (embedding IS NULL) AS pending
+                FROM messages
+                {where}
+                ORDER BY message_date {direction} NULLS LAST, id {direction}
+                LIMIT {limit}
+                """,
+                params,
+            )
+            rows = cur.fetchall()
     except Exception as exc:
         return {"status": "error", "message": str(exc), "data": {"entries": []}}
-    finally:
-        return_connection(conn)
 
     entries = [
         {
@@ -197,15 +191,12 @@ async def check_path(payload: CheckRequest):
     if qvec is not None:
         params["qvec"] = qvec
 
-    conn = get_connection()
     try:
-        cur = conn.cursor()
-        cur.execute(sql, params)
-        rows = cur.fetchall()
+        with db_cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
     except Exception as exc:
         return {"status": "error", "message": str(exc), "data": {"is_unique": True, "matches": []}}
-    finally:
-        return_connection(conn)
 
     matches = []
     for row in rows:
@@ -256,28 +247,27 @@ async def add_path(payload: AddRequest):
     tags = taxonomy.clean_tags(payload.tags)
     embedding = embeddings.to_pgvector(embeddings.embed_document(message_text))
 
-    conn = get_connection()
     try:
-        cur = conn.cursor()
-        category = taxonomy.ensure_category(cur, payload.category)
-        cur.execute(
-            """
-            INSERT INTO messages
-                (message_text, message_date, category, tags, embedding)
-            VALUES
-                (%s, %s, %s, %s, %s::vector)
-            ON CONFLICT (normalized_text) DO NOTHING
-            RETURNING id
-            """,
-            (
-                message_text,
-                payload.message_date,
-                category,
-                tags,
-                embedding,
-            ),
-        )
-        row = cur.fetchone()
+        with db_cursor() as cur:
+            category = taxonomy.ensure_category(cur, payload.category)
+            cur.execute(
+                """
+                INSERT INTO messages
+                    (message_text, message_date, category, tags, embedding)
+                VALUES
+                    (%s, %s, %s, %s, %s::vector)
+                ON CONFLICT (normalized_text) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    message_text,
+                    payload.message_date,
+                    category,
+                    tags,
+                    embedding,
+                ),
+            )
+            row = cur.fetchone()
         if row is None:
             return {"status": "error", "message": "Message already exists"}
 
@@ -285,8 +275,6 @@ async def add_path(payload: AddRequest):
 
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
-    finally:
-        return_connection(conn)
 
 
 @app.patch("/messages/{message_id}")
@@ -296,68 +284,64 @@ async def update_message(message_id: int, payload: UpdateRequest):
     if not provided:
         return {"status": "error", "message": "No fields to update"}
 
-    conn = get_connection()
     try:
-        cur = conn.cursor()
+        with db_cursor() as cur:
+            sets: list[str] = []
+            params: list = []
 
-        sets: list[str] = []
-        params: list = []
+            if "text" in provided:
+                text = (payload.text or "").strip()
+                if len(text) < 2:
+                    return {"status": "error", "message": "Message text too short"}
+                sets.append("message_text = %s")
+                params.append(text)
+                # Text changed → the old embedding is stale. Recompute inline.
+                sets.append("embedding = %s::vector")
+                params.append(embeddings.to_pgvector(embeddings.embed_document(text)))
 
-        if "text" in provided:
-            text = (payload.text or "").strip()
-            if len(text) < 2:
-                return {"status": "error", "message": "Message text too short"}
-            sets.append("message_text = %s")
-            params.append(text)
-            # Text changed → the old embedding is stale. Recompute inline.
-            sets.append("embedding = %s::vector")
-            params.append(embeddings.to_pgvector(embeddings.embed_document(text)))
+            if "message_date" in provided:
+                sets.append("message_date = %s")
+                params.append(payload.message_date)
 
-        if "message_date" in provided:
-            sets.append("message_date = %s")
-            params.append(payload.message_date)
+            if "category" in provided:
+                # Empty string clears the category.
+                category = taxonomy.ensure_category(cur, payload.category)
+                sets.append("category = %s")
+                params.append(category)
 
-        if "category" in provided:
-            # Empty string clears the category.
-            category = taxonomy.ensure_category(cur, payload.category)
-            sets.append("category = %s")
-            params.append(category)
+            if "tags" in provided:
+                sets.append("tags = %s")
+                params.append(taxonomy.clean_tags(payload.tags))
 
-        if "tags" in provided:
-            sets.append("tags = %s")
-            params.append(taxonomy.clean_tags(payload.tags))
+            if not sets:
+                return {"status": "error", "message": "No fields to update"}
 
-        if not sets:
-            return {"status": "error", "message": "No fields to update"}
+            params.append(message_id)
+            cur.execute(
+                f"UPDATE messages SET {', '.join(sets)} WHERE id = %s RETURNING id",
+                params,
+            )
+            found = cur.fetchone()
 
-        params.append(message_id)
-        cur.execute(
-            f"UPDATE messages SET {', '.join(sets)} WHERE id = %s RETURNING id",
-            params,
-        )
-        if cur.fetchone() is None:
+        if found is None:
             return {"status": "error", "message": "Message not found"}
         return {"status": "success", "message": "Message updated", "id": message_id}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
-    finally:
-        return_connection(conn)
 
 
 @app.delete("/messages/{message_id}")
 async def delete_message(message_id: int):
     """Delete one message."""
-    conn = get_connection()
     try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM messages WHERE id = %s RETURNING id", (message_id,))
-        if cur.fetchone() is None:
+        with db_cursor() as cur:
+            cur.execute("DELETE FROM messages WHERE id = %s RETURNING id", (message_id,))
+            found = cur.fetchone()
+        if found is None:
             return {"status": "error", "message": "Message not found"}
         return {"status": "success", "message": "Message deleted", "id": message_id}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
-    finally:
-        return_connection(conn)
 
 
 @app.post("/import")
@@ -371,9 +355,7 @@ async def import_messages(payload: ImportRequest):
     skipped = 0
     errors: list[dict] = []
 
-    conn = get_connection()
-    try:
-        cur = conn.cursor()
+    with db_cursor() as cur:
         for i, row in enumerate(payload.rows):
             text = row.message.strip()
             try:
@@ -394,28 +376,23 @@ async def import_messages(payload: ImportRequest):
             except Exception as exc:
                 errors.append({"row": i + 1, "message": str(exc)})
 
-        return {
-            "status": "success",
-            "data": {"added": added, "skipped": skipped, "errors": errors},
-        }
-    finally:
-        return_connection(conn)
+    return {
+        "status": "success",
+        "data": {"added": added, "skipped": skipped, "errors": errors},
+    }
 
 
 @app.get("/stats")
 async def stats():
     """Archive counts + embedding backfill progress (for the console UI)."""
-    conn = get_connection()
     try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT count(*), count(*) FILTER (WHERE embedding IS NULL) FROM messages"
-        )
-        total, pending = cur.fetchone()
+        with db_cursor() as cur:
+            cur.execute(
+                "SELECT count(*), count(*) FILTER (WHERE embedding IS NULL) FROM messages"
+            )
+            total, pending = cur.fetchone()
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
-    finally:
-        return_connection(conn)
 
     return {
         "status": "success",
@@ -448,23 +425,20 @@ async def start_backfill():
 @app.get("/categories")
 async def list_categories():
     """Managed categories with how many messages use each."""
-    conn = get_connection()
     try:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT c.name, count(m.id) AS uses
-            FROM categories c
-            LEFT JOIN messages m ON m.category = c.name
-            GROUP BY c.name
-            ORDER BY c.name
-            """
-        )
-        rows = cur.fetchall()
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.name, count(m.id) AS uses
+                FROM categories c
+                LEFT JOIN messages m ON m.category = c.name
+                GROUP BY c.name
+                ORDER BY c.name
+                """
+            )
+            rows = cur.fetchall()
     except Exception as exc:
         return {"status": "error", "message": str(exc), "data": {"categories": []}}
-    finally:
-        return_connection(conn)
 
     return {
         "status": "success",
@@ -475,54 +449,45 @@ async def list_categories():
 @app.post("/categories")
 async def create_category(payload: CategoryRequest):
     """Add a category to the managed vocabulary."""
-    conn = get_connection()
     try:
-        cur = conn.cursor()
-        name = taxonomy.ensure_category(cur, payload.name)
+        with db_cursor() as cur:
+            name = taxonomy.ensure_category(cur, payload.name)
         return {"status": "success", "name": name}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
-    finally:
-        return_connection(conn)
 
 
 @app.delete("/categories/{name}")
 async def delete_category(name: str):
     """Remove a category (messages keep their data, category cleared to NULL)."""
-    conn = get_connection()
     try:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM categories WHERE name = %s RETURNING name", (name,))
-        if cur.fetchone() is None:
-            return {"status": "error", "message": "Category not found"}
-        # No FK, so detach the category from any messages that used it.
-        cur.execute("UPDATE messages SET category = NULL WHERE category = %s", (name,))
+        with db_cursor() as cur:
+            cur.execute("DELETE FROM categories WHERE name = %s RETURNING name", (name,))
+            if cur.fetchone() is None:
+                return {"status": "error", "message": "Category not found"}
+            # No FK, so detach the category from any messages that used it.
+            cur.execute("UPDATE messages SET category = NULL WHERE category = %s", (name,))
         return {"status": "success", "name": name}
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
-    finally:
-        return_connection(conn)
 
 
 @app.get("/tags")
 async def list_tags():
     """Distinct tags in use, most-used first (for autocomplete + filters)."""
-    conn = get_connection()
     try:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT tag, count(*) AS uses
-            FROM messages, unnest(tags) AS tag
-            GROUP BY tag
-            ORDER BY uses DESC, tag
-            """
-        )
-        rows = cur.fetchall()
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                SELECT tag, count(*) AS uses
+                FROM messages, unnest(tags) AS tag
+                GROUP BY tag
+                ORDER BY uses DESC, tag
+                """
+            )
+            rows = cur.fetchall()
     except Exception as exc:
         return {"status": "error", "message": str(exc), "data": {"tags": []}}
-    finally:
-        return_connection(conn)
 
     return {
         "status": "success",
