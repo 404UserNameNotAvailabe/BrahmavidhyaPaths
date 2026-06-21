@@ -13,3 +13,4 @@ env/
 
 # OS
 .DS_Store
+Backend/.env.example

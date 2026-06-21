@@ -84,6 +84,9 @@ async def health():
 @app.get("/archive")
 async def list_archive(
     year: int | None = None,
+    season: int | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     q: str | None = None,
     category: str | None = None,
     tag: str | None = None,
@@ -111,6 +114,15 @@ async def list_archive(
     if year is not None:
         clauses.append("year = %s")
         params.append(year)
+    if season is not None:
+        clauses.append("season = %s")
+        params.append(season)
+    if date_from:
+        clauses.append("message_date >= %s::date")
+        params.append(date_from)
+    if date_to:
+        clauses.append("message_date <= %s::date")
+        params.append(date_to)
     if q:
         clauses.append("message_text ILIKE %s")
         params.append(f"%{q.strip()}%")
@@ -140,7 +152,7 @@ async def list_archive(
             cur.execute(
                 f"""
                 SELECT id, message_text, message_date, year, category, tags,
-                       (embedding IS NULL) AS pending, source, is_favorite
+                       (embedding IS NULL) AS pending, source, is_favorite, season
                 FROM messages
                 {where}
                 ORDER BY message_date {direction} NULLS LAST, id {direction}
@@ -150,16 +162,20 @@ async def list_archive(
             )
             rows = cur.fetchall()
 
-            # All distinct years (independent of filters / page) for the picker.
+            # All distinct years + seasons (independent of filters) for pickers.
             cur.execute(
                 "SELECT DISTINCT year FROM messages WHERE year IS NOT NULL ORDER BY year DESC"
             )
             years = [r[0] for r in cur.fetchall()]
+            cur.execute(
+                "SELECT DISTINCT season FROM messages WHERE season IS NOT NULL ORDER BY season DESC"
+            )
+            seasons = [r[0] for r in cur.fetchall()]
     except Exception as exc:
         return {
             "status": "error",
             "message": str(exc),
-            "data": {"entries": [], "years": [], "total": 0},
+            "data": {"entries": [], "years": [], "seasons": [], "total": 0},
         }
 
     entries = [
@@ -173,11 +189,15 @@ async def list_archive(
             "pending": bool(r[6]),
             "source": r[7] or "",
             "is_favorite": bool(r[8]),
+            "season": r[9],
         }
         for r in rows
     ]
 
-    return {"status": "success", "data": {"entries": entries, "years": years, "total": total}}
+    return {
+        "status": "success",
+        "data": {"entries": entries, "years": years, "seasons": seasons, "total": total},
+    }
 
 
 @app.post("/check")
@@ -574,10 +594,10 @@ async def overview():
             )
             total, earliest, latest, favorites = cur.fetchone()
             cur.execute(
-                "SELECT year, count(*) FROM messages WHERE year IS NOT NULL "
-                "GROUP BY year ORDER BY year"
+                "SELECT season, count(*) FROM messages WHERE season IS NOT NULL "
+                "GROUP BY season ORDER BY season"
             )
-            per_year = [{"year": r[0], "count": r[1]} for r in cur.fetchall()]
+            per_season = [{"season": r[0], "count": r[1]} for r in cur.fetchall()]
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
 
@@ -588,7 +608,7 @@ async def overview():
             "earliest": earliest.isoformat() if earliest else None,
             "latest": latest.isoformat() if latest else None,
             "favorites": favorites,
-            "per_year": per_year,
+            "per_season": per_season,
         },
     }
 
