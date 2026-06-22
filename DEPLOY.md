@@ -23,7 +23,8 @@ Replace `<domain>`, `<repo-url>`, `<frontend-repo-url>`, `<TUNNEL_ID>` as you go
 
 - Cloudflare account with `<domain>` on it (Zero Trust not required).
 - Neon connection details (host/db/user/password).
-- A **Gemini Developer API key** (`AIza…`) from aistudio.google.com.
+- A **GCP project with Vertex AI enabled** + a service-account JSON key
+  (`roles/aiplatform.user`) for embeddings — or skip embeddings entirely (see §1.4).
 - Proxmox host.
 
 ---
@@ -73,11 +74,17 @@ Set:
 DB_HOST=...neon...        DB_NAME=neondb   DB_USER=...   DB_PASSWORD=...
 DB_PORT=5432             DB_SSLMODE=require
 
-GEMINI_API_KEY=AIza...           # Developer API key (auto-detected, not Vertex)
+# Embeddings via Vertex AI + ADC (paid tier → Google does NOT train on your data).
+GEMINI_API_KEY=                              # blank ⇒ ADC mode
+GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID
+GOOGLE_CLOUD_LOCATION=us-central1            # or asia-south1 (Mumbai); verify model availability
+GOOGLE_APPLICATION_CREDENTIALS=/opt/brahmavidya/gcp-sa.json
 GEMINI_EMBED_MODEL=gemini-embedding-001
 EMBED_DIM=768
 
 SESSION_TTL_HOURS=168            # 7-day logins
+LOGIN_MAX_FAILS=5
+LOGIN_WINDOW_SECONDS=900
 
 # IMPORTANT — lock CORS to the production frontend origin only:
 CORS_ORIGINS=https://brahmavidya.<domain>
@@ -86,6 +93,16 @@ CORS_ORIGINS=https://brahmavidya.<domain>
 ```bash
 chmod 600 .env && chown brahmavidya:brahmavidya .env
 ```
+
+> **Vertex service-account key (for embeddings).** Do the one-time GCP setup
+> (enable Vertex AI API, create a service account with `roles/aiplatform.user`,
+> download its JSON key), then put the key on the box:
+> ```bash
+> install -o brahmavidya -g brahmavidya -m 600 brahmavidya-sa.json /opt/brahmavidya/gcp-sa.json
+> ```
+> ADC reads `GOOGLE_APPLICATION_CREDENTIALS` automatically — no systemd change.
+> To run **without** any AI (fully self-contained), just leave `GEMINI_API_KEY`,
+> `GOOGLE_CLOUD_PROJECT` blank — matching stays on trigram + word-overlap.
 
 ### 1.5 Apply the schema + create admin user(s)
 

@@ -2,6 +2,10 @@
 .env
 *.env
 *.env.example
+# GCP service-account keys
+*-sa.json
+gcp-sa.json
+service-account*.json
 
 # Python
 __pycache__/
