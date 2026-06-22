@@ -13,6 +13,8 @@ import logging
 from config import EMBED_DIM
 from config import GEMINI_API_KEY
 from config import GEMINI_EMBED_MODEL
+from config import GEMINI_LOCATION
+from config import GEMINI_PROJECT
 from config import GEMINI_USE_VERTEX
 
 logger = logging.getLogger("brahmavidya.embeddings")
@@ -30,18 +32,33 @@ def _get_client():
 
     _client_ready = True
 
-    if not GEMINI_API_KEY:
-        logger.info("GEMINI_API_KEY not set — semantic matching disabled.")
+    # ADC mode: no key but project is set → use service account / workload identity.
+    # Express-mode key (AQ.*) → Vertex with key.
+    # Developer key (AIza*) → non-Vertex with key.
+    use_adc = GEMINI_USE_VERTEX and not GEMINI_API_KEY
+
+    if not use_adc and not GEMINI_API_KEY:
+        logger.info("GEMINI_API_KEY not set and GOOGLE_CLOUD_PROJECT not set — semantic matching disabled.")
+        _client = None
+        return None
+
+    if use_adc and not GEMINI_PROJECT:
+        logger.warning("ADC mode requires GOOGLE_CLOUD_PROJECT — semantic matching disabled.")
         _client = None
         return None
 
     try:
         from google import genai
 
-        if GEMINI_USE_VERTEX:
-            # Vertex AI express mode: key auths directly, no project/location.
+        if use_adc:
+            # ADC: credentials come from GOOGLE_APPLICATION_CREDENTIALS or workload identity.
+            _client = genai.Client(vertexai=True, project=GEMINI_PROJECT, location=GEMINI_LOCATION)
+            logger.info("Gemini client initialised via ADC (project=%s, location=%s).", GEMINI_PROJECT, GEMINI_LOCATION)
+        elif GEMINI_USE_VERTEX:
+            # Vertex AI express-mode key.
             _client = genai.Client(vertexai=True, api_key=GEMINI_API_KEY)
         else:
+            # Gemini Developer API key.
             _client = genai.Client(api_key=GEMINI_API_KEY)
     except Exception as exc:  # SDK missing or init failure
         logger.warning("Gemini client init failed (%s) — semantic disabled.", exc)

@@ -27,13 +27,17 @@ DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001")
 
-# Route through Vertex AI (express mode) vs the Gemini Developer API.
-# Vertex express-mode keys start with "AQ."; Developer API keys with "AIza".
-# Auto-detected from the key prefix, overridable via GEMINI_USE_VERTEX.
-GEMINI_USE_VERTEX = os.getenv(
-    "GEMINI_USE_VERTEX",
-    "true" if GEMINI_API_KEY.startswith("AQ.") else "false",
-).strip().lower() in ("1", "true", "yes")
+# Vertex AI project + location — required for ADC mode (no API key).
+# When GEMINI_API_KEY is blank, the SDK authenticates via ADC (service account
+# key at GOOGLE_APPLICATION_CREDENTIALS, or workload identity on GCP).
+GEMINI_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "")
+GEMINI_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+
+# Route through Vertex AI vs the Gemini Developer API.
+# ADC mode: always Vertex (no key). Express-mode key "AQ." → Vertex.
+# Developer API key "AIza" → non-Vertex. Overridable via GEMINI_USE_VERTEX.
+_default_use_vertex = "true" if (not GEMINI_API_KEY or GEMINI_API_KEY.startswith("AQ.")) else "false"
+GEMINI_USE_VERTEX = os.getenv("GEMINI_USE_VERTEX", _default_use_vertex).strip().lower() in ("1", "true", "yes")
 
 # Embedding dimensionality. Must match the vector(N) column in the migration.
 EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))
