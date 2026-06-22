@@ -318,9 +318,17 @@ async def list_archive(
     if date_to:
         clauses.append("message_date <= %s::date")
         params.append(date_to)
-    if q:
-        clauses.append("message_text ILIKE %s")
-        params.append(f"%{q.strip()}%")
+    if q and q.strip():
+        # Escape LIKE wildcards (\ % _) so the query is a literal substring,
+        # not a pattern — '_' or '%' should match themselves, not everything.
+        like = (
+            q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        clauses.append(
+            "(message_text ILIKE %s ESCAPE '\\' OR source ILIKE %s ESCAPE '\\')"
+        )
+        params.append(f"%{like}%")
+        params.append(f"%{like}%")
     if category:
         clauses.append("category = %s")
         params.append(category.strip())
