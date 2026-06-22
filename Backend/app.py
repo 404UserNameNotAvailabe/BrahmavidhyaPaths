@@ -2,12 +2,11 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
+import audit
+import auth
 import embeddings
 import matching
 import taxonomy
@@ -19,13 +18,25 @@ from models import (
     CategoryRequest,
     CheckRequest,
     ImportRequest,
+    LoginRequest,
     UpdateRequest,
+    UserCreateRequest,
+    UserUpdateRequest,
 )
+
+ROLES = ("viewer", "editor", "admin")
 
 
 logger = logging.getLogger("brahmavidya.app")
 
 SCHEMA_SQL = Path(__file__).resolve().parent / "sql" / "schema.sql"
+
+
+def fail(message: str = "The request could not be completed.", **extra) -> dict:
+    """Log the active exception server-side and return a generic error to the
+    client — internal details (DB errors, stack) never leak out."""
+    logger.warning("Request failed (%s)", message, exc_info=True)
+    return {"status": "error", "message": message, **extra}
 
 
 def init_schema() -> None:
@@ -62,23 +73,206 @@ app = FastAPI(title="Brahmavidya Path Checker", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
-templates = Jinja2Templates(directory="templates")
+@app.middleware("http")
+async def security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
-@app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+@app.get("/")
+async def root():
+    # Minimal, public, no data — for uptime checks. The React frontend (CF
+    # Worker) is the UI; the legacy server-rendered page was removed.
+    return {"service": "brahmavidya", "status": "ok"}
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "semantic": embeddings.is_enabled()}
+
+
+# --- Auth -----------------------------------------------------------------
+
+
+@app.post("/auth/login")
+async def login(payload: LoginRequest):
+    username = payload.username.strip().lower()
+    if auth.login_locked(username):
+        audit.record(username, "login.locked")
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again later.")
+
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT id, password_hash, role FROM users WHERE username = %s", (username,)
+        )
+        row = cur.fetchone()
+        # Always run a hash check (real or dummy) so a missing username and a
+        # wrong password take the same time — no user enumeration via timing.
+        ok = auth.verify_password(payload.password, row[1] if row else auth.DUMMY_HASH)
+        if row is None or not ok:
+            auth.record_login_fail(username)
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        auth.clear_login_fails(username)
+        token, expires = auth.create_session(cur, row[0])
+
+    audit.record(username, "login")
+    return {
+        "status": "success",
+        "token": token,
+        "user": {"username": username, "role": row[2]},
+        "expires_at": expires.isoformat(),
+    }
+
+
+@app.post("/auth/logout")
+async def logout(authorization: str | None = Header(default=None)):
+    token = authorization[7:].strip() if authorization and authorization.lower().startswith("bearer ") else ""
+    if token:
+        auth.delete_session(token)
+    return {"status": "success"}
+
+
+@app.get("/auth/me")
+async def me(user: dict = Depends(auth.get_current_user)):
+    return {"status": "success", "user": {"username": user["username"], "role": user["role"]}}
+
+
+# --- User management (admin only) -----------------------------------------
+
+
+@app.get("/users")
+async def list_users(user: dict = Depends(auth.require_admin)):
+    with db_cursor() as cur:
+        cur.execute("SELECT id, username, role, created_at FROM users ORDER BY id")
+        rows = cur.fetchall()
+    return {
+        "status": "success",
+        "data": {
+            "users": [
+                {
+                    "id": str(r[0]),
+                    "username": r[1],
+                    "role": r[2],
+                    "created_at": r[3].isoformat() if r[3] else None,
+                }
+                for r in rows
+            ]
+        },
+    }
+
+
+@app.post("/users")
+async def create_user_endpoint(
+    payload: UserCreateRequest, user: dict = Depends(auth.require_admin)
+):
+    username = payload.username.strip().lower()
+    role = payload.role.strip().lower()
+    if role not in ROLES:
+        return {"status": "error", "message": "Role must be viewer, editor, or admin"}
+    try:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (username, password_hash, role)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (username) DO NOTHING
+                RETURNING id
+                """,
+                (username, auth.hash_password(payload.password), role),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return {"status": "error", "message": "That username already exists"}
+        audit.record(user["username"], "user.create", f"{username} ({role})")
+        return {"status": "success", "id": str(row[0])}
+    except Exception as exc:
+        return fail()
+
+
+@app.patch("/users/{user_id}")
+async def update_user_endpoint(
+    user_id: int, payload: UserUpdateRequest, user: dict = Depends(auth.require_admin)
+):
+    sets: list[str] = []
+    params: list = []
+    new_role = payload.role.strip().lower() if payload.role is not None else None
+    if new_role is not None:
+        if new_role not in ROLES:
+            return {"status": "error", "message": "Role must be viewer, editor, or admin"}
+        sets.append("role = %s")
+        params.append(new_role)
+    if payload.password is not None:
+        sets.append("password_hash = %s")
+        params.append(auth.hash_password(payload.password))
+    if not sets:
+        return {"status": "error", "message": "Nothing to update"}
+
+    with db_cursor() as cur:
+        cur.execute("SELECT role FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        if row is None:
+            return {"status": "error", "message": "User not found"}
+        # Don't let the last admin be demoted.
+        if row[0] == "admin" and new_role is not None and new_role != "admin":
+            cur.execute("SELECT count(*) FROM users WHERE role = 'admin'")
+            if cur.fetchone()[0] <= 1:
+                return {"status": "error", "message": "Cannot demote the last admin"}
+        params.append(user_id)
+        cur.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = %s", params)
+    changed = "role+password" if (new_role and payload.password) else ("role" if new_role else "password")
+    audit.record(user["username"], "user.update", f"id={user_id} ({changed})")
+    return {"status": "success"}
+
+
+@app.delete("/users/{user_id}")
+async def delete_user_endpoint(user_id: int, user: dict = Depends(auth.require_admin)):
+    if user_id == int(user["id"]):
+        return {"status": "error", "message": "You cannot delete your own account"}
+    with db_cursor() as cur:
+        cur.execute("SELECT role FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        if row is None:
+            return {"status": "error", "message": "User not found"}
+        if row[0] == "admin":
+            cur.execute("SELECT count(*) FROM users WHERE role = 'admin'")
+            if cur.fetchone()[0] <= 1:
+                return {"status": "error", "message": "Cannot delete the last admin"}
+        cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+    audit.record(user["username"], "user.delete", f"id={user_id}")
+    return {"status": "success"}
+
+
+@app.get("/audit")
+async def list_audit(limit: int = 100, user: dict = Depends(auth.require_admin)):
+    limit = max(1, min(limit, 500))
+    with db_cursor() as cur:
+        cur.execute(
+            "SELECT at, username, action, detail FROM audit_log ORDER BY at DESC LIMIT %s",
+            (limit,),
+        )
+        rows = cur.fetchall()
+    return {
+        "status": "success",
+        "data": {
+            "entries": [
+                {
+                    "at": r[0].isoformat() if r[0] else None,
+                    "username": r[1],
+                    "action": r[2],
+                    "detail": r[3],
+                }
+                for r in rows
+            ]
+        },
+    }
 
 
 @app.get("/archive")
@@ -97,6 +291,7 @@ async def list_archive(
     order: str = "desc",
     limit: int = 25,
     offset: int = 0,
+    user: dict = Depends(auth.get_current_user),
 ):
     """
     Paginated ledger of archived messages for the Archive page.
@@ -172,11 +367,10 @@ async def list_archive(
             )
             seasons = [r[0] for r in cur.fetchall()]
     except Exception as exc:
-        return {
-            "status": "error",
-            "message": str(exc),
-            "data": {"entries": [], "years": [], "seasons": [], "total": 0},
-        }
+        return fail(
+            "Could not load the archive.",
+            data={"entries": [], "years": [], "seasons": [], "total": 0},
+        )
 
     entries = [
         {
@@ -201,7 +395,9 @@ async def list_archive(
 
 
 @app.post("/check")
-async def check_path(payload: CheckRequest, semantic: bool = False):
+async def check_path(
+    payload: CheckRequest, semantic: bool = False, user: dict = Depends(auth.get_current_user)
+):
     """
     Find archive entries that overlap the proposed message.
 
@@ -243,7 +439,7 @@ async def check_path(payload: CheckRequest, semantic: bool = False):
             cur.execute(sql, params)
             rows = cur.fetchall()
     except Exception as exc:
-        return {"status": "error", "message": str(exc), "data": {"is_unique": True, "matches": []}}
+        return fail(data={"is_unique": True, "matches": []})
 
     matches = []
     for row in rows:
@@ -283,7 +479,7 @@ async def check_path(payload: CheckRequest, semantic: bool = False):
 
 
 @app.post("/add")
-async def add_path(payload: AddRequest):
+async def add_path(payload: AddRequest, user: dict = Depends(auth.require_editor)):
     """Add a new archive entry, rejecting exact normalized duplicates.
 
     normalized_text and year are DB-generated, so we only supply text, date,
@@ -323,11 +519,13 @@ async def add_path(payload: AddRequest):
         return {"status": "success", "message": "Message added successfully", "id": row[0]}
 
     except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+        return fail()
 
 
 @app.patch("/messages/{message_id}")
-async def update_message(message_id: int, payload: UpdateRequest):
+async def update_message(
+    message_id: int, payload: UpdateRequest, user: dict = Depends(auth.require_editor)
+):
     """Partial update of one message. Changing the text re-embeds it."""
     provided = payload.model_fields_set
     if not provided:
@@ -384,11 +582,11 @@ async def update_message(message_id: int, payload: UpdateRequest):
             return {"status": "error", "message": "Message not found"}
         return {"status": "success", "message": "Message updated", "id": message_id}
     except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+        return fail()
 
 
 @app.delete("/messages/{message_id}")
-async def delete_message(message_id: int):
+async def delete_message(message_id: int, user: dict = Depends(auth.require_admin)):
     """Delete one message."""
     try:
         with db_cursor() as cur:
@@ -396,13 +594,14 @@ async def delete_message(message_id: int):
             found = cur.fetchone()
         if found is None:
             return {"status": "error", "message": "Message not found"}
+        audit.record(user["username"], "message.delete", f"id={message_id}")
         return {"status": "success", "message": "Message deleted", "id": message_id}
     except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+        return fail()
 
 
 @app.post("/import")
-async def import_messages(payload: ImportRequest):
+async def import_messages(payload: ImportRequest, user: dict = Depends(auth.require_editor)):
     """
     Bulk insert rows (parsed client-side from CSV or pasted text). Embeddings
     are left NULL — trigger POST /embeddings/backfill afterwards to fill them.
@@ -432,8 +631,10 @@ async def import_messages(payload: ImportRequest):
                 else:
                     added += 1
             except Exception as exc:
-                errors.append({"row": i + 1, "message": str(exc)})
+                logger.warning("Import row %d failed", i + 1, exc_info=True)
+                errors.append({"row": i + 1, "message": "Could not import this row"})
 
+    audit.record(user["username"], "import", f"added={added} skipped={skipped}")
     return {
         "status": "success",
         "data": {"added": added, "skipped": skipped, "errors": errors},
@@ -441,7 +642,7 @@ async def import_messages(payload: ImportRequest):
 
 
 @app.get("/stats")
-async def stats():
+async def stats(user: dict = Depends(auth.get_current_user)):
     """Archive counts + embedding backfill progress (for the console UI)."""
     try:
         with db_cursor() as cur:
@@ -450,7 +651,7 @@ async def stats():
             )
             total, pending = cur.fetchone()
     except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+        return fail()
 
     return {
         "status": "success",
@@ -464,7 +665,7 @@ async def stats():
 
 
 @app.post("/embeddings/backfill")
-async def start_backfill():
+async def start_backfill(user: dict = Depends(auth.require_editor)):
     """Kick off the background embedder for rows missing an embedding."""
     if not embeddings.is_enabled():
         return {"status": "error", "message": "Semantic embeddings are not configured"}
@@ -481,7 +682,7 @@ async def start_backfill():
 
 
 @app.get("/categories")
-async def list_categories():
+async def list_categories(user: dict = Depends(auth.get_current_user)):
     """Managed categories with how many messages use each."""
     try:
         with db_cursor() as cur:
@@ -496,7 +697,7 @@ async def list_categories():
             )
             rows = cur.fetchall()
     except Exception as exc:
-        return {"status": "error", "message": str(exc), "data": {"categories": []}}
+        return fail(data={"categories": []})
 
     return {
         "status": "success",
@@ -505,18 +706,18 @@ async def list_categories():
 
 
 @app.post("/categories")
-async def create_category(payload: CategoryRequest):
+async def create_category(payload: CategoryRequest, user: dict = Depends(auth.require_editor)):
     """Add a category to the managed vocabulary."""
     try:
         with db_cursor() as cur:
             name = taxonomy.ensure_category(cur, payload.name)
         return {"status": "success", "name": name}
     except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+        return fail()
 
 
 @app.delete("/categories/{name}")
-async def delete_category(name: str):
+async def delete_category(name: str, user: dict = Depends(auth.require_admin)):
     """Remove a category (messages keep their data, category cleared to NULL)."""
     try:
         with db_cursor() as cur:
@@ -525,13 +726,14 @@ async def delete_category(name: str):
                 return {"status": "error", "message": "Category not found"}
             # No FK, so detach the category from any messages that used it.
             cur.execute("UPDATE messages SET category = NULL WHERE category = %s", (name,))
+        audit.record(user["username"], "category.delete", name)
         return {"status": "success", "name": name}
     except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+        return fail()
 
 
 @app.get("/tags")
-async def list_tags():
+async def list_tags(user: dict = Depends(auth.get_current_user)):
     """Distinct tags in use, most-used first (for autocomplete + filters)."""
     try:
         with db_cursor() as cur:
@@ -545,7 +747,7 @@ async def list_tags():
             )
             rows = cur.fetchall()
     except Exception as exc:
-        return {"status": "error", "message": str(exc), "data": {"tags": []}}
+        return fail(data={"tags": []})
 
     return {
         "status": "success",
@@ -554,7 +756,7 @@ async def list_tags():
 
 
 @app.get("/sources")
-async def list_sources():
+async def list_sources(user: dict = Depends(auth.get_current_user)):
     """Distinct speaker/source attributions in use, most-used first."""
     try:
         with db_cursor() as cur:
@@ -569,7 +771,7 @@ async def list_sources():
             )
             rows = cur.fetchall()
     except Exception as exc:
-        return {"status": "error", "message": str(exc), "data": {"sources": []}}
+        return fail(data={"sources": []})
 
     return {
         "status": "success",
@@ -581,7 +783,7 @@ async def list_sources():
 
 
 @app.get("/overview")
-async def overview():
+async def overview(user: dict = Depends(auth.get_current_user)):
     """Headline stats for the archive: total, date span, per-year counts."""
     try:
         with db_cursor() as cur:
@@ -599,7 +801,7 @@ async def overview():
             )
             per_season = [{"season": r[0], "count": r[1]} for r in cur.fetchall()]
     except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+        return fail()
 
     return {
         "status": "success",
@@ -614,7 +816,7 @@ async def overview():
 
 
 @app.get("/onthisday")
-async def on_this_day():
+async def on_this_day(user: dict = Depends(auth.get_current_user)):
     """Vachans given on today's month+day in past years."""
     try:
         with db_cursor() as cur:
@@ -630,7 +832,7 @@ async def on_this_day():
             )
             rows = cur.fetchall()
     except Exception as exc:
-        return {"status": "error", "message": str(exc), "data": {"entries": []}}
+        return fail(data={"entries": []})
 
     return {
         "status": "success",
@@ -650,7 +852,9 @@ async def on_this_day():
 
 
 @app.get("/duplicates")
-async def duplicates(threshold: float = 0.55, limit: int = 50):
+async def duplicates(
+    threshold: float = 0.55, limit: int = 50, user: dict = Depends(auth.require_editor)
+):
     """
     Near-duplicate vachan PAIRS already in the archive (trigram similarity),
     so admins can merge/delete. O(n²) self-join — fine for a small corpus.
@@ -674,7 +878,7 @@ async def duplicates(threshold: float = 0.55, limit: int = 50):
             )
             rows = cur.fetchall()
     except Exception as exc:
-        return {"status": "error", "message": str(exc), "data": {"pairs": []}}
+        return fail(data={"pairs": []})
 
     pairs = [
         {

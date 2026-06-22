@@ -38,6 +38,9 @@ GEMINI_USE_VERTEX = os.getenv(
 # Embedding dimensionality. Must match the vector(N) column in the migration.
 EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))
 
+# How long a login session stays valid (hours). Default 7 days.
+SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", str(24 * 7)))
+
 # Allowed CORS origins (comma-separated). Defaults to the local dev frontends.
 CORS_ORIGINS = [
     origin.strip()

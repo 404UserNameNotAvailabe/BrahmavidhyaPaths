@@ -1,0 +1,21 @@
+[Unit]
+Description=Brahmavidya API (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=brahmavidya
+Group=brahmavidya
+WorkingDirectory=/opt/brahmavidya/app/Backend
+# config.py loads ./.env via python-dotenv, so no EnvironmentFile is needed.
+# Bind to localhost only — the Cloudflare Tunnel is the sole public path in.
+ExecStart=/opt/brahmavidya/app/Backend/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=3
+# Light hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

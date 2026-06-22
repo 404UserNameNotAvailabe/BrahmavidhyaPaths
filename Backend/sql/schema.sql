@@ -8,6 +8,33 @@
 CREATE EXTENSION IF NOT EXISTS pg_trgm;   -- trigram similarity (fuzzy match)
 CREATE EXTENSION IF NOT EXISTS vector;    -- pgvector (semantic match)
 
+-- Admin accounts + opaque session tokens (DB-backed, revocable).
+CREATE TABLE IF NOT EXISTS users (
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    username      text UNIQUE NOT NULL CHECK (btrim(username) <> ''),
+    password_hash text NOT NULL,
+    role          text NOT NULL DEFAULT 'admin',
+    created_at    timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token       text PRIMARY KEY,
+    user_id     bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    expires_at  timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_sessions_expires ON sessions (expires_at);
+
+-- Audit trail of who did what (logins, user + content changes).
+CREATE TABLE IF NOT EXISTS audit_log (
+    id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    at        timestamptz NOT NULL DEFAULT now(),
+    username  text,
+    action    text NOT NULL,
+    detail    text
+);
+CREATE INDEX IF NOT EXISTS ix_audit_at ON audit_log (at DESC);
+
 -- Managed category vocabulary (broad editorial grouping for the archive).
 -- The name is the key, so messages.category stores the name directly and the
 -- FK keeps it valid. This is archive metadata — NOT used by duplication.

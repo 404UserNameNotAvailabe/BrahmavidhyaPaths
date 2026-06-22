@@ -81,3 +81,25 @@ class CategoryRequest(BaseModel):
     """Body for POST /categories."""
 
     name: str = Field(min_length=1, max_length=CATEGORY_MAX)
+
+
+class LoginRequest(BaseModel):
+    """Body for POST /auth/login."""
+
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class UserCreateRequest(BaseModel):
+    """Body for POST /users (admin only)."""
+
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=8, max_length=200)
+    role: str = Field(default="viewer")
+
+
+class UserUpdateRequest(BaseModel):
+    """Body for PATCH /users/{id} — change role and/or reset password."""
+
+    role: str | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=200)
