@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Annotated
 
 from pydantic import AliasChoices, BaseModel, Field
 
@@ -10,34 +11,21 @@ SOURCE_MAX = 120
 
 
 class CheckRequest(BaseModel):
-    """Body for POST /check. React frontend sends `text`; the legacy HTML
-    page sends `path` — accept either."""
+    """Body for POST /check."""
 
-    text: str = Field(
-        min_length=2,
-        max_length=2000,
-        validation_alias=AliasChoices("text", "path"),
-    )
-
-    model_config = {"populate_by_name": True}
+    text: str = Field(min_length=2, max_length=2000)
 
 
 class AddRequest(BaseModel):
     """Body for POST /add — a new archive entry."""
 
-    text: str = Field(
-        min_length=2,
-        max_length=2000,
-        validation_alias=AliasChoices("text", "path"),
-    )
+    text: str = Field(min_length=2, max_length=2000)
     # year is derived from message_date by the DB (generated column).
     message_date: date | None = None
     # Editorial metadata: one broad category + free tags.
     category: str | None = Field(default=None, max_length=CATEGORY_MAX)
     tags: list[str] = Field(default_factory=list, max_length=MAX_TAGS)
     source: str | None = Field(default=None, max_length=SOURCE_MAX)
-
-    model_config = {"populate_by_name": True}
 
 
 class UpdateRequest(BaseModel):
@@ -61,9 +49,9 @@ class ImportRow(BaseModel):
 
     message: str = Field(min_length=2, max_length=2000)
     # JSON key is `date`; named message_date here to avoid shadowing the type.
-    message_date: date | None = Field(
-        default=None, validation_alias=AliasChoices("date", "message_date")
-    )
+    message_date: Annotated[
+        date | None, Field(validation_alias=AliasChoices("date", "message_date"))
+    ] = None
     category: str | None = Field(default=None, max_length=CATEGORY_MAX)
     tags: list[str] = Field(default_factory=list, max_length=MAX_TAGS)
     source: str | None = Field(default=None, max_length=SOURCE_MAX)
