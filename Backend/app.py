@@ -417,8 +417,10 @@ async def check_path(
     query = payload.text.strip()
     query_norm = matching.normalize_text(query)
     query_tokens = matching.tokenize(query)
+    query_seq = matching.token_list(query)
 
-    # Semantic adds a Gemini embedding call — opt-in so the default stays fast.
+    # Semantic adds a Gemini embedding call — opt-in (Deep check) for reworded
+    # duplicates. The default check is purely literal text overlap.
     qvec = embeddings.to_pgvector(embeddings.embed_query(query)) if semantic else None
 
     if qvec is not None:
@@ -428,11 +430,11 @@ async def check_path(
         sem_expr = "NULL"
         sem_order = "0"
 
-    # Duplication is purely text-based — no category/tags here by design.
+    # Prefilter candidates by trigram (and semantic when deep-checking) so we
+    # only score a handful in Python; exact matches rank top via trigram anyway.
     sql = f"""
         SELECT
-            id, message_text, message_date, year,
-            similarity(normalized_text, %(q)s) AS trgm,
+            id, message_text, normalized_text, message_date, year,
             {sem_expr} AS sem
         FROM messages
         ORDER BY GREATEST(similarity(normalized_text, %(q)s), {sem_order}) DESC
@@ -446,43 +448,52 @@ async def check_path(
         with db_cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()
-    except Exception as exc:
-        return fail(data={"is_unique": True, "matches": []})
+    except Exception:
+        return fail(data={"verdict": "new", "matches": []})
 
+    KIND_RANK = {"exact": 5, "strong": 4, "some": 3, "reworded": 1}
     matches = []
-    for row in rows:
-        msg_id, msg_text, msg_date, year, trgm, sem = row
-
+    for msg_id, msg_text, row_norm, msg_date, year, sem in rows:
         row_tokens = matching.tokenize(msg_text)
-        matched_tokens = query_tokens & row_tokens
-        token_sim = matching.token_overlap(query_tokens, row_tokens)
+        cov = matching.coverage(query_tokens, row_tokens)
+        phrase = matching.longest_shared_phrase(query_seq, matching.token_list(msg_text))
+        kind = matching.check_kind(query_norm, row_norm or "", cov, phrase)
 
-        score = matching.combine_score(
-            trigram=float(trgm or 0.0),
-            token=token_sim,
-            semantic=float(sem) if sem is not None else None,
-        )
-
-        if score < matching.MATCH_FLOOR:
-            continue
+        sem_pct = round(float(sem) * 100) if sem is not None else None
+        # Incidental (weak / none) literal overlap isn't shown — too noisy with
+        # the corpus's shared vocabulary. Deep check can still surface a
+        # meaning-level match via the embedding even with little literal overlap.
+        if kind in ("none", "weak"):
+            if sem is not None and float(sem) >= 0.80:
+                kind = "reworded"
+            else:
+                continue
 
         matches.append({
             "id": str(msg_id),
             "year": year,
             "date": msg_date.isoformat() if msg_date else None,
-            "matched_snippet": matching.highlight_overlap(msg_text, matched_tokens),
-            "confidence_score": score,
+            "overlap_pct": round(cov * 100),
+            "shared_phrase_words": phrase,
+            "kind": kind,
+            "semantic_pct": sem_pct,
+            "matched_snippet": matching.highlight_overlap(msg_text, query_tokens & row_tokens),
         })
 
-    matches.sort(key=lambda m: m["confidence_score"], reverse=True)
+    matches.sort(key=lambda m: (KIND_RANK[m["kind"]], m["overlap_pct"]), reverse=True)
     matches = matches[:20]
 
-    best = matches[0]["confidence_score"] if matches else 0.0
-    is_unique = best < matching.UNIQUE_THRESHOLD
+    # 3-state verdict: identical exists / worth reviewing / new.
+    if matches and matches[0]["kind"] == "exact":
+        verdict = "exact"
+    elif matches:
+        verdict = "review"
+    else:
+        verdict = "new"
 
     return {
         "status": "success",
-        "data": {"is_unique": is_unique, "matches": matches},
+        "data": {"verdict": verdict, "matches": matches},
     }
 
 

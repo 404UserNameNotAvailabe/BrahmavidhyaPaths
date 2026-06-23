@@ -101,3 +101,69 @@ def token_overlap(query_tokens: set[str], row_tokens: set[str]) -> float:
     inter = len(query_tokens & row_tokens)
     union = len(query_tokens | row_tokens)
     return inter / union if union else 0.0
+
+
+# --- literal duplicate check (deterministic, no fuzzy score) --------------
+# A new message is judged purely on how much of *its own text* literally
+# appears in an existing vachan, plus the longest shared word-for-word phrase.
+
+PHRASE_STRONG = 4  # a shared run of ≥4 words is a strong duplicate signal
+PHRASE_WEAK = 3  # a shared 3-word phrase is worth surfacing
+COVERAGE_STRONG = 0.60  # ≥60% of the new message's words also in the vachan
+
+
+def token_list(text: str) -> list[str]:
+    """Ordered word list (keeps duplicates/order) for phrase matching."""
+    cleaned = _PUNCT_RE.sub(" ", normalize_text(text))
+    return [tok for tok in cleaned.split() if tok]
+
+
+def coverage(query_tokens: set[str], row_tokens: set[str]) -> float:
+    """Fraction of the new message's words that also appear in the vachan (0–1)."""
+    if not query_tokens:
+        return 0.0
+    return len(query_tokens & row_tokens) / len(query_tokens)
+
+
+def longest_shared_phrase(a: list[str], b: list[str]) -> int:
+    """Length (in words) of the longest contiguous run shared by a and b."""
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    best = 0
+    for i in range(1, len(a) + 1):
+        cur = [0] * (len(b) + 1)
+        ai = a[i - 1]
+        for j in range(1, len(b) + 1):
+            if ai == b[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best:
+                    best = cur[j]
+        prev = cur
+    return best
+
+
+def check_kind(query_norm: str, row_norm: str, cov: float, phrase_len: int) -> str:
+    """Classify one candidate. Order matters — strongest first.
+
+    exact  : same vachan (after normalizing spacing/case)
+    strong : most of your words AND a long shared phrase → likely duplicate
+    some   : a long (4+) shared phrase, or most words plus a real phrase → review
+    weak   : only a short common phrase (3 words) → incidental, not shown
+    none   : nothing notable
+
+    A bare short phrase (e.g. "ભગવાન અને સંત") is treated as incidental — high
+    word coverage alone is not enough without a real shared phrase, so common
+    vocabulary doesn't raise false alarms.
+    """
+    if query_norm and query_norm == row_norm:
+        return "exact"
+    if cov >= COVERAGE_STRONG and phrase_len >= PHRASE_STRONG:
+        return "strong"
+    if phrase_len >= PHRASE_STRONG:
+        return "some"
+    if cov >= COVERAGE_STRONG and phrase_len >= PHRASE_WEAK:
+        return "some"
+    if phrase_len >= PHRASE_WEAK:
+        return "weak"
+    return "none"

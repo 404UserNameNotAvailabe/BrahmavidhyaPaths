@@ -33,6 +33,12 @@ pool = ConnectionPool(
     max_size=10,
     open=True,
     kwargs={"autocommit": True},
+    # Neon (serverless) closes idle connections, so a pooled one can be dead.
+    # check: validate (and replace) a connection before handing it out.
+    # max_idle/max_lifetime: recycle connections before Neon drops them.
+    check=ConnectionPool.check_connection,
+    max_idle=120.0,
+    max_lifetime=600.0,
 )
 
 
