@@ -483,7 +483,9 @@ async def check_path(
         # Weak overlap is shown only for short lookups; for a full pasted vachan
         # it's incidental noise. Deep check can still surface a meaning match.
         if kind == "none" or (kind == "weak" and not short):
-            if sem is not None and float(sem) >= 0.80:
+            # 0.87 threshold: short spiritual Gujarati texts share topic
+            # vocabulary easily, so 0.80 produced too many false positives.
+            if sem is not None and float(sem) >= 0.87:
                 kind = "reworded"
             else:
                 continue
@@ -515,9 +517,18 @@ async def check_path(
     else:
         verdict = "new"
 
+    unembedded_count = 0
+    if semantic:
+        try:
+            with db_cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM messages WHERE embedding IS NULL")
+                unembedded_count = cur.fetchone()[0]
+        except Exception:
+            pass
+
     return {
         "status": "success",
-        "data": {"verdict": verdict, "matches": matches},
+        "data": {"verdict": verdict, "matches": matches, "unembedded_count": unembedded_count},
     }
 
 
