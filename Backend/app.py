@@ -430,17 +430,27 @@ async def check_path(
         sem_expr = "NULL"
         sem_order = "0"
 
-    # Prefilter candidates by trigram (and semantic when deep-checking) so we
-    # only score a handful in Python; exact matches rank top via trigram anyway.
+    # ILIKE pattern for substring containment — escape SQL wildcard chars.
+    ilike_norm_q = (
+        "%" + query_norm.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    )
+
+    # Prefilter: literal substring containment ranks first (0.99) so short
+    # phrases that live inside a vachan always surface, then trigram + semantic
+    # fill the rest of the top 50.
     sql = f"""
         SELECT
             id, message_text, normalized_text, message_date, year,
             {sem_expr} AS sem
         FROM messages
-        ORDER BY GREATEST(similarity(normalized_text, %(q)s), {sem_order}) DESC
+        ORDER BY GREATEST(
+            CASE WHEN normalized_text ILIKE %(ilike_q)s ESCAPE '\\' THEN 0.99 ELSE 0 END,
+            similarity(normalized_text, %(q)s),
+            {sem_order}
+        ) DESC
         LIMIT 50
     """
-    params = {"q": query_norm}
+    params = {"q": query_norm, "ilike_q": ilike_norm_q}
     if qvec is not None:
         params["qvec"] = qvec
 
@@ -452,7 +462,8 @@ async def check_path(
         return fail(data={"verdict": "new", "matches": []})
 
     query_len = len(query_seq)
-    short = query_len <= 2  # a 1–2 word lookup is a search, not a duplicate check
+    # ≤6 words = search intent; weak matches are shown and labelled "contains".
+    short = query_len <= 6
 
     KIND_RANK = {"exact": 6, "contains": 5, "strong": 4, "some": 3, "reworded": 1}
     matches = []
@@ -460,7 +471,13 @@ async def check_path(
         row_tokens = matching.tokenize(msg_text)
         cov = matching.coverage(query_tokens, row_tokens)
         phrase = matching.longest_shared_phrase(query_seq, matching.token_list(msg_text))
-        kind = matching.check_kind(query_norm, row_norm or "", cov, phrase, query_len)
+
+        # Literal substring containment fires before fuzzy scoring — gives the
+        # same result as the Archive page's ILIKE search.
+        if query_norm and query_norm in (row_norm or ""):
+            kind = "contains"
+        else:
+            kind = matching.check_kind(query_norm, row_norm or "", cov, phrase, query_len)
 
         sem_pct = round(float(sem) * 100) if sem is not None else None
         # Weak overlap is shown only for short lookups; for a full pasted vachan
@@ -488,10 +505,10 @@ async def check_path(
     matches.sort(key=lambda m: (KIND_RANK[m["kind"]], m["overlap_pct"]), reverse=True)
     matches = matches[:20]
 
-    # verdict: identical exists / contains (short lookup) / worth reviewing / new.
+    # verdict: identical exists / contains (literal/search) / worth reviewing / new.
     if matches and matches[0]["kind"] == "exact":
         verdict = "exact"
-    elif short and matches:
+    elif matches and matches[0]["kind"] == "contains":
         verdict = "contains"
     elif matches:
         verdict = "review"
