@@ -143,27 +143,29 @@ def longest_shared_phrase(a: list[str], b: list[str]) -> int:
     return best
 
 
-def check_kind(query_norm: str, row_norm: str, cov: float, phrase_len: int) -> str:
+def check_kind(query_norm: str, row_norm: str, cov: float, phrase_len: int, query_len: int) -> str:
     """Classify one candidate. Order matters — strongest first.
 
-    exact  : same vachan (after normalizing spacing/case)
-    strong : most of your words AND a long shared phrase → likely duplicate
-    some   : a long (4+) shared phrase, or most words plus a real phrase → review
-    weak   : only a short common phrase (3 words) → incidental, not shown
-    none   : nothing notable
+    The phrase requirement adapts to how much was typed, so a 1–2 word lookup
+    can match (the whole query appears) while a full pasted vachan still needs a
+    real 4-word phrase — keeping common vocabulary from raising false alarms.
 
-    A bare short phrase (e.g. "ભગવાન અને સંત") is treated as incidental — high
-    word coverage alone is not enough without a real shared phrase, so common
-    vocabulary doesn't raise false alarms.
+    exact  : same vachan (after normalizing spacing/case)
+    strong : most words AND a long-enough shared phrase → likely duplicate
+    some   : a long-enough shared phrase, or most words + a phrase → review
+    weak   : a borderline phrase → incidental (only shown for short queries)
+    none   : nothing notable
     """
     if query_norm and query_norm == row_norm:
         return "exact"
-    if cov >= COVERAGE_STRONG and phrase_len >= PHRASE_STRONG:
+    strong_phrase = min(PHRASE_STRONG, query_len)  # e.g. 1-word query → 1
+    weak_phrase = min(PHRASE_WEAK, query_len)
+    if cov >= COVERAGE_STRONG and phrase_len >= strong_phrase:
         return "strong"
-    if phrase_len >= PHRASE_STRONG:
+    if phrase_len >= strong_phrase:
         return "some"
-    if cov >= COVERAGE_STRONG and phrase_len >= PHRASE_WEAK:
+    if cov >= COVERAGE_STRONG and phrase_len >= weak_phrase:
         return "some"
-    if phrase_len >= PHRASE_WEAK:
+    if phrase_len >= weak_phrase:
         return "weak"
     return "none"

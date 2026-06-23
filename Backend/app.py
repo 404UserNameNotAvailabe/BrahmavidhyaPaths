@@ -451,23 +451,28 @@ async def check_path(
     except Exception:
         return fail(data={"verdict": "new", "matches": []})
 
-    KIND_RANK = {"exact": 5, "strong": 4, "some": 3, "reworded": 1}
+    query_len = len(query_seq)
+    short = query_len <= 2  # a 1–2 word lookup is a search, not a duplicate check
+
+    KIND_RANK = {"exact": 6, "contains": 5, "strong": 4, "some": 3, "reworded": 1}
     matches = []
     for msg_id, msg_text, row_norm, msg_date, year, sem in rows:
         row_tokens = matching.tokenize(msg_text)
         cov = matching.coverage(query_tokens, row_tokens)
         phrase = matching.longest_shared_phrase(query_seq, matching.token_list(msg_text))
-        kind = matching.check_kind(query_norm, row_norm or "", cov, phrase)
+        kind = matching.check_kind(query_norm, row_norm or "", cov, phrase, query_len)
 
         sem_pct = round(float(sem) * 100) if sem is not None else None
-        # Incidental (weak / none) literal overlap isn't shown — too noisy with
-        # the corpus's shared vocabulary. Deep check can still surface a
-        # meaning-level match via the embedding even with little literal overlap.
-        if kind in ("none", "weak"):
+        # Weak overlap is shown only for short lookups; for a full pasted vachan
+        # it's incidental noise. Deep check can still surface a meaning match.
+        if kind == "none" or (kind == "weak" and not short):
             if sem is not None and float(sem) >= 0.80:
                 kind = "reworded"
             else:
                 continue
+        # A short lookup is a search — label it "contains" rather than "duplicate".
+        if short and kind in ("strong", "some", "weak"):
+            kind = "contains"
 
         matches.append({
             "id": str(msg_id),
@@ -483,9 +488,11 @@ async def check_path(
     matches.sort(key=lambda m: (KIND_RANK[m["kind"]], m["overlap_pct"]), reverse=True)
     matches = matches[:20]
 
-    # 3-state verdict: identical exists / worth reviewing / new.
+    # verdict: identical exists / contains (short lookup) / worth reviewing / new.
     if matches and matches[0]["kind"] == "exact":
         verdict = "exact"
+    elif short and matches:
+        verdict = "contains"
     elif matches:
         verdict = "review"
     else:
