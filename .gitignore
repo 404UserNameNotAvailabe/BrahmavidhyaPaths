@@ -1,0 +1,20 @@
+# Secrets — never commit
+.env
+*.env
+*.env.example
+# GCP service-account keys
+*-sa.json
+gcp-sa.json
+service-account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Backend/.env.example

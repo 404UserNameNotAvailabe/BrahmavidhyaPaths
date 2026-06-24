@@ -24,34 +24,36 @@ function renderError(message) {
   return `<div class="error-state">${escapeHtml(message)}</div>`;
 }
 
+// Keep only <mark> tags from a backend snippet; strip everything else.
+function sanitizeSnippet(html) {
+  return (html ?? "").replace(/<(?!\/?mark\b)[^>]*>/gi, "");
+}
+
 function renderResults(data) {
-  if (!data.matches || data.matches.length === 0) {
+  const matches = data?.data?.matches || [];
+  if (matches.length === 0) {
     return renderEmptyState();
   }
 
   let html = `
     <div class="result-summary">
       <h3>Matching Paths</h3>
-      <span class="count">${data.totalMatches}</span>
+      <span class="count">${matches.length}</span>
     </div>
   `;
 
-  data.matches.forEach((item) => {
-    const tier = matchTierClass(item.matchPercentage);
-    const words = (item.matchedWords || [])
-      .map((w) => `<span class="word-chip">${escapeHtml(w)}</span>`)
-      .join("");
+  matches.forEach((item) => {
+    const score = Math.round(item.confidence_score);
+    const tier = matchTierClass(score);
+    const meta = [item.date, item.topic].filter(Boolean).map(escapeHtml).join(" &middot; ");
 
     html += `
       <div class="card">
         <div class="card-top">
-          <div class="card-path">${escapeHtml(item.pathText)}</div>
-          <span class="match-badge ${tier}">${item.matchPercentage}% match</span>
+          <div class="card-path">${sanitizeSnippet(item.matched_snippet)}</div>
+          <span class="match-badge ${tier}">${score}% match</span>
         </div>
-        <div class="matched-words">
-          <span class="label">Matched words:</span>
-          ${words || "<span>&mdash;</span>"}
-        </div>
+        ${meta ? `<div class="matched-words"><span class="label">${meta}</span></div>` : ""}
       </div>
     `;
   });
@@ -89,7 +91,7 @@ async function checkPath() {
 
     const data = await response.json();
 
-    if (!data.success) {
+    if (data.status === "error") {
       resultEl.innerHTML = renderError(data.message || "Something went wrong. Please try again.");
       return;
     }
@@ -171,7 +173,7 @@ async function addPath() {
     const data =
       await response.json();
 
-    if (!data.success) {
+    if (data.status === "error") {
 
       resultEl.innerHTML =
         renderError(

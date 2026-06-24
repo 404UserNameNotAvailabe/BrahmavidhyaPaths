@@ -1,0 +1,12 @@
+# Cloudflare Tunnel config — copy to /etc/cloudflared/config.yml and fill in.
+# Created via:  cloudflared tunnel create brahmavidya
+#               cloudflared tunnel route dns brahmavidya api.brahmavidya.<domain>
+
+tunnel: <TUNNEL_ID>
+credentials-file: /root/.cloudflared/<TUNNEL_ID>.json
+
+ingress:
+  - hostname: api.brahmavidya.<domain>
+    service: http://127.0.0.1:8000
+  # Everything else → 404 (the tunnel only serves the API hostname).
+  - service: http_status:404
