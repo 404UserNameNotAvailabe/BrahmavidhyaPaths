@@ -44,6 +44,7 @@ Everything needs a login. Roles: **viewer** (read and check), **editor** (+ add,
 ### The original links (baps.org)
 - BAPS publishes each season as a news page called "'Brahmavidya' – Dhanurmas Messages from HH Mahant Swami Maharaj YYYY-YY". The page has a gallery with one image per day, e.g. `https://www.baps.org/Data/Sites/1/Media/GalleryImages/32361/WebImages/20241216_brahmavidyapath.jpg`.
 - Every archived path's `link` points at **its own day's image**. The full list is in `Backend/sql/links_baps.sql`, which can be re-run safely and only fills empty links.
+- **Adding a season:** store the text in **Gujarati script** (Hindi in Devanagari, English as written), *not* the romanised text on the news page, because Check compares script-to-script. Transcribe from each day's image and check it against the romanised list. Note that the 2025–26 page lists them **newest first** (14 Jan → 16 Dec) while 2024–25 lists oldest first, so always confirm the order against the date printed on each image ("બ્રહ્મવિદ્યાનો પાઠ – N", day N = 15 + N Dec).
 - **Image filenames are irregular** (`_001`, `__1_`, `_copy`, and numbered by day instead of date in 2016–18). Never guess a URL; read it from the season page.
 - The **news pages sit behind a Cloudflare bot check**, so `curl` gets 403. Open them in a normal browser. The image URLs themselves load fine.
 
@@ -58,7 +59,7 @@ Everything needs a login. Roles: **viewer** (read and check), **editor** (+ add,
 | 2022–23 | `/News/2022/…-2022-23-22847.aspx` | ✅ 30 |
 | 2023–24 | `/News/2023/…-2023-24-24900.aspx` | ✅ 30 |
 | 2024–25 | `/News/2024/…-2024-25-27698.aspx` | ✅ 30 |
-| 2025–26 | `/News/2025/…-2025-26-30593.aspx` | ❌ not imported |
+| 2025–26 | `/News/2025/…-2025-26-30593.aspx` | ✅ 30 (`sql/seed_dhanurmas_2025-2026.sql`) |
 
 Full page name: `https://www.baps.org/News/<year>/Brahmavidya---Dhanurmas-Messages-from-HH-Mahant-Swami-Maharaj-<season>-<id>.aspx`.
 
