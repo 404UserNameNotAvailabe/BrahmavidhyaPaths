@@ -15,7 +15,6 @@ from config import CORS_ORIGINS
 from database import close_pool, db_cursor
 from models import (
     AddRequest,
-    CategoryRequest,
     CheckRequest,
     ImportRequest,
     LoginRequest,
@@ -282,11 +281,9 @@ async def list_archive(
     date_from: str | None = None,
     date_to: str | None = None,
     q: str | None = None,
-    category: str | None = None,
     tag: str | None = None,
     source: str | None = None,
     favorite: bool = False,
-    uncategorized: bool = False,
     untagged: bool = False,
     order: str = "desc",
     limit: int = 25,
@@ -295,8 +292,8 @@ async def list_archive(
 ):
     """
     Paginated ledger of archived messages for the Archive page.
-    Filters: `year`, `q` (text search), `category`, `tag`, `uncategorized`,
-    `untagged`. `order` = "asc" | "desc" by date. Returns `total` (filtered
+    Filters: `year`, `season`, `date_from`/`date_to`, `q` (text search),
+    `tag`, `source`, `favorite`, `untagged`. `order` = "asc" | "desc" by date. Returns `total` (filtered
     count, for pagination) and `years` (all distinct years, for the picker).
     Each entry carries a `pending` flag (embedding not yet computed).
     """
@@ -329,9 +326,6 @@ async def list_archive(
         )
         params.append(f"%{like}%")
         params.append(f"%{like}%")
-    if category:
-        clauses.append("category = %s")
-        params.append(category.strip())
     if tag:
         clauses.append("%s = ANY(tags)")
         params.append(tag.strip())
@@ -340,8 +334,6 @@ async def list_archive(
         params.append(source.strip())
     if favorite:
         clauses.append("is_favorite")
-    if uncategorized:
-        clauses.append("category IS NULL")
     if untagged:
         clauses.append("(tags IS NULL OR cardinality(tags) = 0)")
 
@@ -354,7 +346,7 @@ async def list_archive(
 
             cur.execute(
                 f"""
-                SELECT id, message_text, message_date, year, category, tags,
+                SELECT id, message_text, message_date, year, link, tags,
                        (embedding IS NULL) AS pending, source, is_favorite, season
                 FROM messages
                 {where}
@@ -386,7 +378,7 @@ async def list_archive(
             "message": r[1],
             "date": r[2].isoformat() if r[2] else None,
             "year": r[3],
-            "category": r[4] or "",
+            "link": r[4] or "",
             "tags": r[5] or [],
             "pending": bool(r[6]),
             "source": r[7] or "",
@@ -440,7 +432,7 @@ async def check_path(
     # fill the rest of the top 50.
     sql = f"""
         SELECT
-            id, message_text, normalized_text, message_date, year,
+            id, message_text, normalized_text, message_date, year, link,
             {sem_expr} AS sem
         FROM messages
         ORDER BY GREATEST(
@@ -467,7 +459,7 @@ async def check_path(
 
     KIND_RANK = {"exact": 6, "contains": 5, "strong": 4, "some": 3, "reworded": 1}
     matches = []
-    for msg_id, msg_text, row_norm, msg_date, year, sem in rows:
+    for msg_id, msg_text, row_norm, msg_date, year, link, sem in rows:
         row_tokens = matching.tokenize(msg_text)
         cov = matching.coverage(query_tokens, row_tokens)
         phrase = matching.longest_shared_phrase(query_seq, matching.token_list(msg_text))
@@ -497,6 +489,7 @@ async def check_path(
             "id": str(msg_id),
             "year": year,
             "date": msg_date.isoformat() if msg_date else None,
+            "link": link or "",
             "overlap_pct": round(cov * 100),
             "shared_phrase_words": phrase,
             "kind": kind,
@@ -536,8 +529,8 @@ async def check_path(
 async def add_path(payload: AddRequest, user: dict = Depends(auth.require_editor)):
     """Add a new archive entry, rejecting exact normalized duplicates.
 
-    normalized_text and year are DB-generated, so we only supply text, date,
-    theme, and embedding. ON CONFLICT makes the insert atomic against the
+    normalized_text, year and season are DB-generated, so we only supply text,
+    date, tags, source, link and embedding. ON CONFLICT makes the insert atomic against the
     unique normalized_text index.
     """
     message_text = payload.text.strip()
@@ -547,11 +540,10 @@ async def add_path(payload: AddRequest, user: dict = Depends(auth.require_editor
 
     try:
         with db_cursor() as cur:
-            category = taxonomy.ensure_category(cur, payload.category)
             cur.execute(
                 """
                 INSERT INTO messages
-                    (message_text, message_date, category, tags, source, embedding)
+                    (message_text, message_date, tags, source, link, embedding)
                 VALUES
                     (%s, %s, %s, %s, %s, %s::vector)
                 ON CONFLICT (normalized_text) DO NOTHING
@@ -560,9 +552,9 @@ async def add_path(payload: AddRequest, user: dict = Depends(auth.require_editor
                 (
                     message_text,
                     payload.message_date,
-                    category,
                     tags,
                     source,
+                    payload.link,
                     embedding,
                 ),
             )
@@ -604,11 +596,6 @@ async def update_message(
                 sets.append("message_date = %s")
                 params.append(payload.message_date)
 
-            if "category" in provided:
-                # Empty string clears the category.
-                category = taxonomy.ensure_category(cur, payload.category)
-                sets.append("category = %s")
-                params.append(category)
 
             if "tags" in provided:
                 sets.append("tags = %s")
@@ -617,6 +604,10 @@ async def update_message(
             if "source" in provided:
                 sets.append("source = %s")
                 params.append((payload.source or "").strip() or None)
+
+            if "link" in provided:
+                sets.append("link = %s")
+                params.append(payload.link)
 
             if "is_favorite" in provided:
                 sets.append("is_favorite = %s")
@@ -669,16 +660,21 @@ async def import_messages(payload: ImportRequest, user: dict = Depends(auth.requ
         for i, row in enumerate(payload.rows):
             text = row.message.strip()
             try:
-                category = taxonomy.ensure_category(cur, row.category)
+                taxonomy.check_season_date(row.message_date)
+                link = taxonomy.clean_link(row.link)
+            except ValueError as exc:
+                errors.append({"row": i + 1, "message": str(exc)})
+                continue
+            try:
                 source = (row.source or "").strip() or taxonomy.extract_source(text)
                 cur.execute(
                     """
-                    INSERT INTO messages (message_text, message_date, category, tags, source)
+                    INSERT INTO messages (message_text, message_date, tags, source, link)
                     VALUES (%s, %s, %s, %s, %s)
                     ON CONFLICT (normalized_text) DO NOTHING
                     RETURNING id
                     """,
-                    (text, row.message_date, category, taxonomy.clean_tags(row.tags), source),
+                    (text, row.message_date, taxonomy.clean_tags(row.tags), source, link),
                 )
                 if cur.fetchone() is None:
                     skipped += 1
@@ -732,58 +728,7 @@ async def start_backfill(user: dict = Depends(auth.require_editor)):
     }
 
 
-# --- Archive taxonomy (categories + tags) ---------------------------------
-
-
-@app.get("/categories")
-async def list_categories(user: dict = Depends(auth.get_current_user)):
-    """Managed categories with how many messages use each."""
-    try:
-        with db_cursor() as cur:
-            cur.execute(
-                """
-                SELECT c.name, count(m.id) AS uses
-                FROM categories c
-                LEFT JOIN messages m ON m.category = c.name
-                GROUP BY c.name
-                ORDER BY c.name
-                """
-            )
-            rows = cur.fetchall()
-    except Exception as exc:
-        return fail(data={"categories": []})
-
-    return {
-        "status": "success",
-        "data": {"categories": [{"name": r[0], "count": r[1]} for r in rows]},
-    }
-
-
-@app.post("/categories")
-async def create_category(payload: CategoryRequest, user: dict = Depends(auth.require_editor)):
-    """Add a category to the managed vocabulary."""
-    try:
-        with db_cursor() as cur:
-            name = taxonomy.ensure_category(cur, payload.name)
-        return {"status": "success", "name": name}
-    except Exception as exc:
-        return fail()
-
-
-@app.delete("/categories/{name}")
-async def delete_category(name: str, user: dict = Depends(auth.require_admin)):
-    """Remove a category (messages keep their data, category cleared to NULL)."""
-    try:
-        with db_cursor() as cur:
-            cur.execute("DELETE FROM categories WHERE name = %s RETURNING name", (name,))
-            if cur.fetchone() is None:
-                return {"status": "error", "message": "Category not found"}
-            # No FK, so detach the category from any messages that used it.
-            cur.execute("UPDATE messages SET category = NULL WHERE category = %s", (name,))
-        audit.record(user["username"], "category.delete", name)
-        return {"status": "success", "name": name}
-    except Exception as exc:
-        return fail()
+# --- Archive taxonomy (tags) ----------------------------------------------
 
 
 @app.get("/tags")
@@ -876,7 +821,7 @@ async def on_this_day(user: dict = Depends(auth.get_current_user)):
         with db_cursor() as cur:
             cur.execute(
                 """
-                SELECT id, message_text, message_date, year, source
+                SELECT id, message_text, message_date, year, source, link
                 FROM messages
                 WHERE message_date IS NOT NULL
                   AND extract(month FROM message_date) = extract(month FROM CURRENT_DATE)
@@ -898,6 +843,7 @@ async def on_this_day(user: dict = Depends(auth.get_current_user)):
                     "date": r[2].isoformat() if r[2] else None,
                     "year": r[3],
                     "source": r[4] or "",
+                    "link": r[5] or "",
                 }
                 for r in rows
             ]

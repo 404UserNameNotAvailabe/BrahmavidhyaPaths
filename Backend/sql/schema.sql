@@ -35,14 +35,6 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS ix_audit_at ON audit_log (at DESC);
 
--- Managed category vocabulary (broad editorial grouping for the archive).
--- The name is the key, so messages.category stores the name directly and the
--- FK keeps it valid. This is archive metadata — NOT used by duplication.
-CREATE TABLE IF NOT EXISTS categories (
-    name        text PRIMARY KEY CHECK (btrim(name) <> ''),
-    created_at  timestamptz NOT NULL DEFAULT now()
-);
-
 CREATE TABLE IF NOT EXISTS messages (
     id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 
@@ -67,13 +59,13 @@ CREATE TABLE IF NOT EXISTS messages (
                              ELSE extract(year FROM message_date)::int - 1 END
                     ) STORED,
 
-    -- Archive categorization (editorial). One broad category + many free tags.
-    -- category is a name from the managed `categories` list (app-enforced).
-    category        text,
+    -- Archive grouping (editorial): free tags. Not used by duplication.
     tags            text[] NOT NULL DEFAULT '{}',
 
     -- Who the vachan is attributed to (Shriji Maharaj, Pramukh Swami, …).
     source          text,
+    -- Original published source (http/https URL) of the vachan.
+    link            text,
     -- Admin-starred important vachans.
     is_favorite     boolean NOT NULL DEFAULT false,
 
@@ -87,10 +79,42 @@ CREATE TABLE IF NOT EXISTS messages (
 -- Upgrade path: add columns that may be missing on a `messages` table created
 -- before they existed. Idempotent, so running schema.sql again is always safe
 -- (the app runs it on every startup to keep the DB in sync with the code).
-ALTER TABLE messages ADD COLUMN IF NOT EXISTS category text;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS tags text[] NOT NULL DEFAULT '{}';
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS source text;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_favorite boolean NOT NULL DEFAULT false;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS link text;
+
+-- Category was merged into tags. Fold any category into tags first so nothing
+-- is lost, then drop the column + its vocabulary table.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_name = 'messages' AND column_name = 'category') THEN
+        UPDATE messages SET tags = array_prepend(category, tags)
+        WHERE category IS NOT NULL AND btrim(category) <> ''
+          AND NOT category = ANY(tags);
+        ALTER TABLE messages DROP COLUMN category;
+    END IF;
+END $$;
+DROP TABLE IF EXISTS categories;
+
+-- Every vachan is dated inside Dhanurmas: 16 Dec → 14 Jan.
+DO $$
+BEGIN
+    ALTER TABLE messages ADD CONSTRAINT ck_messages_dhanurmas CHECK (
+        message_date IS NULL
+        OR (extract(month FROM message_date) = 12 AND extract(day FROM message_date) >= 16)
+        OR (extract(month FROM message_date) = 1  AND extract(day FROM message_date) <= 14)
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Original link must be a full http(s) URL.
+DO $$
+BEGIN
+    ALTER TABLE messages ADD CONSTRAINT ck_messages_link CHECK (link IS NULL OR link ~* '^https?://\S+$');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS season int GENERATED ALWAYS AS (
     CASE WHEN extract(month FROM message_date) >= 7
          THEN extract(year FROM message_date)::int
@@ -111,7 +135,6 @@ CREATE INDEX IF NOT EXISTS ix_messages_embedding_hnsw
 
 -- Archive ordering / filtering.
 CREATE INDEX IF NOT EXISTS ix_messages_date ON messages (message_date DESC);
-CREATE INDEX IF NOT EXISTS ix_messages_category ON messages (category);
 CREATE INDEX IF NOT EXISTS ix_messages_tags ON messages USING gin (tags);
 CREATE INDEX IF NOT EXISTS ix_messages_source ON messages (source);
 CREATE INDEX IF NOT EXISTS ix_messages_favorite ON messages (is_favorite) WHERE is_favorite;
