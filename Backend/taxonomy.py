@@ -1,13 +1,45 @@
 """
-Helpers for archive categorization (editorial metadata).
+Helpers for archive metadata: Dhanurmas dates, original links, tags, source.
 
-Categories are a managed vocabulary (a row in `categories`); tags are free.
-Neither is used by the duplication engine — this is archive organization only.
+Tags are the single free-form grouping (category was merged into tags). None
+of this is used by the duplication engine — it is archive organization only.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import date
+
+# Every Dhanurmas season runs 16 Dec → 14 Jan (30 vachans, one per day).
+SEASON_START = (12, 16)
+SEASON_END = (1, 14)
+SEASON_LABEL = "16 Dec – 14 Jan"
+
+LINK_MAX = 500
+_LINK_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
+
+
+def in_season(d: date) -> bool:
+    """True when the date falls inside the Dhanurmas window."""
+    return (d.month, d.day) >= SEASON_START or (d.month, d.day) <= SEASON_END
+
+
+def check_season_date(d: date | None) -> date | None:
+    """Pass a Dhanurmas date (or None) through; raise ValueError otherwise."""
+    if d is not None and not in_season(d):
+        raise ValueError(f"Date must fall in Dhanurmas ({SEASON_LABEL})")
+    return d
+
+
+def clean_link(link: str | None) -> str | None:
+    """Trim the original-source URL; blank → None. Raises ValueError when it
+    isn't an http(s) URL or is too long."""
+    clean = (link or "").strip()
+    if not clean:
+        return None
+    if len(clean) > LINK_MAX or not _LINK_RE.match(clean):
+        raise ValueError("Link must be a full http:// or https:// URL")
+    return clean
 
 # A trailing attribution: "… - શ્રીજી મહારાજ" / "… – શ્રીજી". Kept short and
 # name-like so we don't grab sentence fragments.
@@ -35,15 +67,3 @@ def clean_tags(tags: list[str] | None) -> list[str]:
             out.append(t)
     return out
 
-
-def ensure_category(cur, name: str | None) -> str | None:
-    """Return the cleaned category name, inserting it into the managed list if
-    new. Empty/blank → None (no category)."""
-    clean = (name or "").strip()
-    if not clean:
-        return None
-    cur.execute(
-        "INSERT INTO categories (name) VALUES (%s) ON CONFLICT (name) DO NOTHING",
-        (clean,),
-    )
-    return clean
