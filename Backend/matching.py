@@ -22,15 +22,27 @@ MATCH_FLOOR = 18.0
 # If the best match is below this the input is considered unique.
 UNIQUE_THRESHOLD = 35.0
 
-# Keep only the Gujarati block, word chars, and whitespace.
-_PUNCT_RE = re.compile(r"[^\w\s઀-૿]")
+# Letters + combining marks of the scripts in the archive. Python's \w misses
+# Indic vowel signs and the virama, so the blocks are listed explicitly:
+# Gujarati (U+0A80–0AFF) and Devanagari (U+0900–097F) minus its dandas । ॥
+# (U+0964–65, punctuation), plus ZWNJ/ZWJ, which sit inside words.
+_INDIC = "઀-૿ऀ-ॣ०-ॿ‌‍"
+_PUNCT_RE = re.compile(rf"[^\w\s{_INDIC}]")
 _WS_RE = re.compile(r"\s+")
-_WORD_RE = re.compile(r"[\w઀-૿]+")
+_WORD_RE = re.compile(rf"[\w{_INDIC}]+")
+
+# Punctuation that never changes what a vachan says. It is dropped from the
+# exact-duplicate key, so "સંપ રાખે." and "સંપ રાખે" are the same vachan.
+# MUST stay identical to the character class of `normalized_text` in
+# sql/schema.sql — change both together.
+NORM_PUNCT = "]\\.,!?;:'\"“”‘’(){}[|/=+*&%#@~`^<>_–—…।॥-"
+_NORM_PUNCT_RE = re.compile("[" + re.escape(NORM_PUNCT) + "]")
 
 
 def normalize_text(text: str) -> str:
-    """Trim, collapse whitespace, lowercase. Used for storage + trigram."""
-    return _WS_RE.sub(" ", text.strip()).lower()
+    """The exact-duplicate key: punctuation → space, collapse whitespace, trim,
+    lowercase. Mirrors the generated column `normalized_text` in schema.sql."""
+    return _WS_RE.sub(" ", _NORM_PUNCT_RE.sub(" ", text)).strip().lower()
 
 
 def tokenize(text: str) -> set[str]:
@@ -150,14 +162,19 @@ def check_kind(query_norm: str, row_norm: str, cov: float, phrase_len: int, quer
     can match (the whole query appears) while a full pasted vachan still needs a
     real 4-word phrase — keeping common vocabulary from raising false alarms.
 
-    exact  : same vachan (after normalizing spacing/case)
-    strong : most words AND a long-enough shared phrase → likely duplicate
+    exact    : same vachan (ignoring spacing, case and punctuation)
+    contains : the typed text appears inside the vachan, word for word
+    strong   : most words AND a long-enough shared phrase → likely duplicate
     some   : a long-enough shared phrase, or most words + a phrase → review
     weak   : a borderline phrase → incidental (only shown for short queries)
     none   : nothing notable
     """
+    # Exact must be tested before containment: identical text is also its own
+    # substring, and labelling it "contains" let an existing vachan be re-added.
     if query_norm and query_norm == row_norm:
         return "exact"
+    if query_norm and query_norm in row_norm:
+        return "contains"
     strong_phrase = min(PHRASE_STRONG, query_len)  # e.g. 1-word query → 1
     weak_phrase = min(PHRASE_WEAK, query_len)
     if cov >= COVERAGE_STRONG and phrase_len >= strong_phrase:

@@ -33,7 +33,7 @@ Everything needs a login. Roles: **viewer** (read and check), **editor** (+ add,
 ### Fields on a path (`messages`)
 | Field | Meaning |
 |---|---|
-| `message_text` | The path in Gujarati, exactly as written. `normalized_text` is generated from it and must be unique, which is how exact duplicates are blocked. |
+| `message_text` | The path in Gujarati, exactly as written. `normalized_text` is generated from it (punctuation removed, spacing collapsed, lowercased) and must be unique, which is how exact duplicates are blocked: `સંપ રાખે.` and `સંપ રાખે` count as the same path. The Python twin is `matching.normalize_text`, and the two must stay identical. |
 | `message_date` | The day it was given (inside the season window). |
 | `link` | **Original source**: the handwritten path image on baps.org (see below). It must be an http(s) URL (`ck_messages_link`). |
 | `tags` | The only grouping field. **There is no category** (it was merged into tags in Oct 2026). |
@@ -66,9 +66,11 @@ Full page name: `https://www.baps.org/News/<year>/Brahmavidya---Dhanurmas-Messag
 ### How "Check" decides
 Check is deliberately **literal**, so its results can be explained: `Backend/matching.py` + `POST /check`.
 - It compares word coverage (the share of the new path's words found in an archived path) and the longest shared run of consecutive words.
-- Results are `exact`, `strong`/`some` (an overlap worth reviewing) or `contains` (short queries of ≤6 words are treated as a search).
+- Results are `exact` (same words, ignoring punctuation), `contains` (the typed text appears inside a path, and short queries of ≤6 words are treated as a search), or `strong`/`some` (an overlap worth reviewing). Exact is tested before contains.
+- Words are split for Gujarati, Hindi (Devanagari, vowel signs kept) and English.
 - The overall verdict is `exact` / `review` / `contains` / `new`.
-- **Deep check** (`?semantic=true`) adds Vertex AI embeddings and labels a meaning match of ≥0.87 as `reworded`. It is opt-in because it costs a network call.
+- **Deep check** (`?semantic=true`) adds Vertex AI embeddings and labels a meaning match of ≥0.87 as `reworded`. It is opt-in because it costs a network call. The response's `semantic_used` is `false` when Deep check was asked for but could not run (the embedding call failed); the result is then word matching only.
+- **Source** is auto-detected from a trailing `– name` only when the name contains a guru/saint word (મહારાજ, સ્વામી, સ્વા., બાપા, શ્રીજી, or their Hindi forms). Many vachans end in a dash phrase that is not a speaker.
 
 ---
 
