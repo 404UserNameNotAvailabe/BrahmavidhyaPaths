@@ -10,6 +10,8 @@ These rules are for anyone changing this repo, people and AI coding tools alike.
 ## Keep the three copies of a rule in sync
 The Dhanurmas window (16 Dec – 14 Jan) is enforced in `Backend/taxonomy.py`, in `Backend/sql/schema.sql` (`ck_messages_dhanurmas`), and in the frontend's `src/lib/season.ts`. The same goes for the link format (`clean_link` / `ck_messages_link` / `isValidLink`). Change one, change all three.
 
+The exact-duplicate key's punctuation class lives in `Backend/matching.py` (`NORM_PUNCT`) and twice in `Backend/sql/schema.sql` (`normalized_text` in CREATE TABLE and in the v2 upgrade). All three must be identical. Changing it means a new guarded upgrade with a new marker, plus a Postgres-vs-Python parity check on every row.
+
 ## Schema
 - `Backend/sql/schema.sql` runs on **every API start**. Everything in it must be idempotent and safe to run against the live DB.
 - Test a schema change against the real DB in a transaction and `ROLLBACK`, before merging.

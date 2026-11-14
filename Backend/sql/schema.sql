@@ -41,10 +41,13 @@ CREATE TABLE IF NOT EXISTS messages (
     -- The archived Gujarati message.
     message_text    text NOT NULL CHECK (btrim(message_text) <> ''),
 
-    -- Normalized form for exact-dup detection + trigram similarity.
-    -- Mirrors matching.normalize_text(): lower(collapse-ws(trim(text))).
-    normalized_text text GENERATED ALWAYS AS
-                      (lower(regexp_replace(btrim(message_text), '\s+', ' ', 'g'))) STORED,
+    -- Normalized form for exact-dup detection + trigram similarity:
+    -- punctuation → space, collapse whitespace, trim, lowercase.
+    -- Mirrors matching.normalize_text() — the character class must match
+    -- matching.NORM_PUNCT exactly (same expression in the upgrade below).
+    normalized_text text GENERATED ALWAYS AS (lower(btrim(regexp_replace(
+                      regexp_replace(message_text, $re$[]\\.,!?;:'"“”‘’(){}[|/=+*&%#@~`^<>_–—…।॥-]$re$, ' ', 'g'),
+                      '\s+', ' ', 'g')))) STORED,
 
     -- The only real metadata the corpus has.
     message_date    date,
@@ -83,6 +86,27 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS tags text[] NOT NULL DEFAULT '{}';
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS source text;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_favorite boolean NOT NULL DEFAULT false;
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS link text;
+
+-- normalized_text v2 (Nov 2026): punctuation no longer counts, so
+-- "સંપ રાખે." and "સંપ રાખે" are the same vachan. Upgrades a table created with
+-- the old expression (whitespace + case only). Guarded on the deparsed
+-- expression ('।॥' appears only in v2) so the table is rewritten once, not on
+-- every start. Needs PostgreSQL 17+ (SET EXPRESSION).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_attrdef d
+        JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+        WHERE d.adrelid = 'messages'::regclass
+          AND a.attname = 'normalized_text'
+          AND pg_get_expr(d.adbin, d.adrelid) LIKE '%।॥%'
+    ) THEN
+        ALTER TABLE messages ALTER COLUMN normalized_text SET EXPRESSION AS (lower(btrim(regexp_replace(
+            regexp_replace(message_text, $re$[]\\.,!?;:'"“”‘’(){}[|/=+*&%#@~`^<>_–—…।॥-]$re$, ' ', 'g'),
+            '\s+', ' ', 'g'))));
+    END IF;
+END $$;
 
 -- Category was merged into tags. Fold any category into tags first so nothing
 -- is lost, then drop the column + its vocabulary table.

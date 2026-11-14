@@ -432,7 +432,7 @@ async def check_path(
     # fill the rest of the top 50.
     sql = f"""
         SELECT
-            id, message_text, normalized_text, message_date, year, link,
+            id, message_text, message_date, year, link,
             {sem_expr} AS sem
         FROM messages
         ORDER BY GREATEST(
@@ -459,17 +459,15 @@ async def check_path(
 
     KIND_RANK = {"exact": 6, "contains": 5, "strong": 4, "some": 3, "reworded": 1}
     matches = []
-    for msg_id, msg_text, row_norm, msg_date, year, link, sem in rows:
+    for msg_id, msg_text, msg_date, year, link, sem in rows:
         row_tokens = matching.tokenize(msg_text)
         cov = matching.coverage(query_tokens, row_tokens)
         phrase = matching.longest_shared_phrase(query_seq, matching.token_list(msg_text))
 
-        # Literal substring containment fires before fuzzy scoring — gives the
-        # same result as the Archive page's ILIKE search.
-        if query_norm and query_norm in (row_norm or ""):
-            kind = "contains"
-        else:
-            kind = matching.check_kind(query_norm, row_norm or "", cov, phrase, query_len)
+        # Normalised here with the same function as the query, so exact /
+        # contains never depend on the DB column's expression.
+        row_norm = matching.normalize_text(msg_text)
+        kind = matching.check_kind(query_norm, row_norm, cov, phrase, query_len)
 
         sem_pct = round(float(sem) * 100) if sem is not None else None
         # Weak overlap is shown only for short lookups; for a full pasted vachan
@@ -521,7 +519,14 @@ async def check_path(
 
     return {
         "status": "success",
-        "data": {"verdict": verdict, "matches": matches, "unembedded_count": unembedded_count},
+        "data": {
+            "verdict": verdict,
+            "matches": matches,
+            "unembedded_count": unembedded_count,
+            # False when Deep check was asked for but the query embedding
+            # failed (or semantic is off): the result is word matching only.
+            "semantic_used": qvec is not None,
+        },
     }
 
 

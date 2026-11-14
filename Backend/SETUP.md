@@ -62,7 +62,7 @@ python -m uvicorn app:app --reload   # http://localhost:8000
 
 | Method | Path     | Body / Query                         | Returns |
 |--------|----------|--------------------------------------|---------|
-| POST   | `/check` | `{ "text": "…" }` (legacy `path` ok) | `{ status, data: { is_unique, matches: [{ id, year, date, matched_snippet, confidence_score }] } }` |
+| POST   | `/check?semantic=bool` | `{ "text": "…" }` | `{ status, data: { verdict: "exact"\|"contains"\|"review"\|"new", matches: [{ id, year, date, link, overlap_pct, shared_phrase_words, kind, semantic_pct, matched_snippet }], unembedded_count, semantic_used } }` |
 
 **Curation** (add / import / edit — used by the Saint's Review console):
 

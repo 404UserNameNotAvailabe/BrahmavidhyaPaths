@@ -41,9 +41,11 @@ def clean_link(link: str | None) -> str | None:
         raise ValueError("Link must be a full http:// or https:// URL")
     return clean
 
-# A trailing attribution: "… - શ્રીજી મહારાજ" / "… – શ્રીજી". Kept short and
-# name-like so we don't grab sentence fragments.
+# A trailing attribution: "… - પ્રમુખસ્વામી મહારાજ" / "… – પ્ર. સ્વા. મ.".
 _SOURCE_RE = re.compile(r"[-–—]\s*([^-–—\n]{2,30})\s*$")
+# A dash also ends many vachans ("સાચો લાભ - સંતનો સમાગમ."), so a trailer only
+# counts as a source when it names a guru or saint by one of these words.
+_SOURCE_HINTS = ("મહારાજ", "महाराज", "સ્વામી", "स्वामी", "સ્વા.", "स्वा.", "બાપા", "बापा", "શ્રીજી", "श्रीजी")
 
 
 def extract_source(text: str | None) -> str | None:
@@ -55,7 +57,9 @@ def extract_source(text: str | None) -> str | None:
     if not m:
         return None
     name = m.group(1).strip().rstrip(".।")
-    return name if 2 <= len(name) <= 30 else None
+    if not 2 <= len(name) <= 30 or not any(h in m.group(1) for h in _SOURCE_HINTS):
+        return None
+    return name
 
 
 def clean_tags(tags: list[str] | None) -> list[str]:
