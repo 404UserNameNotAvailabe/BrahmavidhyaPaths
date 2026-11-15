@@ -175,6 +175,18 @@ def check_kind(query_norm: str, row_norm: str, cov: float, phrase_len: int, quer
         return "exact"
     if query_norm and query_norm in row_norm:
         return "contains"
+    return overlap_kind(cov, phrase_len, query_len)
+
+
+def overlap_kind(cov: float, phrase_len: int, query_len: int) -> str:
+    """The word-overlap part of check_kind, without the exact/contains tests:
+    strong / some / weak / none from coverage and the longest shared phrase.
+    Used directly by the candidate pipeline, which has its own exact/contained
+    rules (candidate_rules.py)."""
+    if query_len == 0:
+        # Nothing but punctuation was typed: with a 0-word phrase bar every
+        # row would otherwise count as an overlap.
+        return "none"
     strong_phrase = min(PHRASE_STRONG, query_len)  # e.g. 1-word query → 1
     weak_phrase = min(PHRASE_WEAK, query_len)
     if cov >= COVERAGE_STRONG and phrase_len >= strong_phrase:
