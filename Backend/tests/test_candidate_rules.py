@@ -87,15 +87,15 @@ class Decide(unittest.TestCase):
 class Shortlist(unittest.TestCase):
     def test_word_hits_first_then_nearest_capped(self):
         words = {1: WordResult("none", 0, 0), 2: WordResult("strong", 80, 5), 3: WordResult("weak", 30, 3)}
-        nearest = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        nearest = list(range(10, 30))
         out = cr.shortlist(words, nearest)
         self.assertEqual(out[:2], [2, 3])
-        self.assertEqual(out[2:], nearest[:8])  # only the 8 nearest
+        self.assertEqual(out[2:], nearest[: cr.NEAREST_BY_MEANING])  # only the N nearest
         self.assertLessEqual(len(out), cr.SHORTLIST_CAP)
 
     def test_cap(self):
         words = {i: WordResult("some", 50, 4) for i in range(20)}
-        self.assertEqual(len(cr.shortlist(words, [100, 101])), 12)
+        self.assertEqual(len(cr.shortlist(words, [100, 101])), cr.SHORTLIST_CAP)
 
     def test_no_duplicates(self):
         self.assertEqual(cr.shortlist({5: WordResult("some", 50, 4)}, [5, 6]), [5, 6])

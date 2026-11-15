@@ -25,6 +25,9 @@ from candidate_rules import JUDGE_LABELS, MAX_TOPICS
 logger = logging.getLogger("brahmavidya.judge")
 
 JUDGE_MODEL = os.getenv("GEMINI_JUDGE_MODEL", "")
+# Region for the judge only (embeddings keep GOOGLE_CLOUD_LOCATION). Blank = same.
+JUDGE_LOCATION = os.getenv("GEMINI_JUDGE_LOCATION", "").strip()
+_judge_client = None
 REASON_MAX_WORDS = 25
 
 SYSTEM = """You compare a proposed spiritual message (a "candidate") with messages already given in past years ("paths"). The texts are short teachings from BAPS Swaminarayan sadhus, mostly in Gujarati, some in Hindi or English. Judge meaning, not just wording.
@@ -32,12 +35,14 @@ SYSTEM = """You compare a proposed spiritual message (a "candidate") with messag
 Label every listed path with exactly one of:
 - same_sentence: the same wording apart from spacing, punctuation, spelling, or an added exclamation or attribution (e.g. "અહો!" added at the start).
 - same_message: a listener would take away the same single teaching, though the words differ. This applies across languages.
-- similar: the same subject and a close point, or the same sentence frame with a different key word. A person should read both.
-- different: shares only a topic or common words.
+- similar: the same SPECIFIC point said differently, or the same sentence frame with one key word swapped, so that a person choosing paths might count one as a repeat of the other. A person should read both.
+- different: everything else. Sharing a theme (satsang, seva, unity, the guru's glory, moksha), a metaphor, an image or a general spiritual idea is NOT similar — that is different.
+
+Most shortlisted paths are different: the shortlist is built to be broad. Use similar sparingly and same_message only when the single teaching truly matches.
 
 For each path give a reason: one plain-English sentence of 25 words or fewer naming what is the same or what differs. Do not start it with the label (it is shown separately). You may quote Gujarati words.
 
-Also choose 1 or 2 topics for the candidate, most fitting first, from the topic list only.
+Also choose 1 or 2 topics for the candidate from the topic list only, the most SPECIFIC fitting topic first. Broad topics (સમજણ, મહિમા, સત્સંગ) come first only when no more specific topic fits the sentence's main point.
 
 Reply with JSON only, matching the schema. Include every listed path exactly once."""
 
@@ -136,7 +141,14 @@ def _vertex_generate(prompt: str) -> str:
     import embeddings  # lazy: pulls in config/.env and the SDK
     from google.genai import types
 
+    global _judge_client
     client = embeddings._get_client()
+    if client is not None and JUDGE_LOCATION and not embeddings.GEMINI_API_KEY:
+        if _judge_client is None:  # ADC client pinned to the judge's region
+            from google import genai
+
+            _judge_client = genai.Client(vertexai=True, project=embeddings.GEMINI_PROJECT, location=JUDGE_LOCATION)
+        client = _judge_client
     if client is None or not JUDGE_MODEL:
         raise JudgeError("judge model not configured")
     resp = client.models.generate_content(
