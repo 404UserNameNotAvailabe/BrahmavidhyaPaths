@@ -182,7 +182,13 @@ def _analyse(rows, topic_names: list[str]) -> tuple[list[dict], dict]:
         "doubled_words": sum(1 for x in out if x["doubled_word"]),
         "no_topic": sum(1 for x in out if not x["topics"]),
     }
-    summary["ready"] = sum(1 for x in out if not x["errors"] and not x["in_pool"])
+    # Ready = nothing to look at (given / repeat / in pool / typo / error are all flagged).
+    summary["ready"] = sum(
+        1 for x in out
+        if not x["errors"] and not x["in_pool"] and x["repeat_of_index"] is None and not x["doubled_word"]
+        and not (x["archive"] and x["archive"]["kind"] in ("exact", "contained"))
+    )
+    summary["saveable"] = sum(1 for x in out if not x["errors"] and not x["in_pool"])
     return out, summary
 
 
@@ -554,7 +560,7 @@ async def give_candidate(candidate_id: int, payload: CandidateGiveRequest, user:
 @router.post("/candidates/recheck")
 async def recheck_candidates(payload: RecheckRequest, user: dict = Depends(auth.require_editor)):
     try:
-        n = cands.queue(payload.ids)
+        n = cands.queue(payload.ids, payload.failed_only)
     except Exception:
         return fail()
     candidate_worker.wake()

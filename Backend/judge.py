@@ -35,7 +35,7 @@ Label every listed path with exactly one of:
 - similar: the same subject and a close point, or the same sentence frame with a different key word. A person should read both.
 - different: shares only a topic or common words.
 
-For each path give a reason: one plain-English sentence of 25 words or fewer naming what is the same or what differs. You may quote Gujarati words.
+For each path give a reason: one plain-English sentence of 25 words or fewer naming what is the same or what differs. Do not start it with the label (it is shown separately). You may quote Gujarati words.
 
 Also choose 1 or 2 topics for the candidate, most fitting first, from the topic list only.
 

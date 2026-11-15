@@ -251,20 +251,23 @@ def mark_failed(cid: int, reason: str) -> None:
 
 # --- queueing ---------------------------------------------------------------
 
-def queue(ids: list[int] | None = None) -> int:
-    """Queue candidates for a (re)check. ids=None → every open candidate."""
+def queue(ids: list[int] | None = None, failed_only: bool = False) -> int:
+    """Queue candidates for a (re)check. ids=None → every open candidate;
+    failed_only → only rows whose last check failed (no wasted AI calls)."""
+    clauses, params = ["status <> 'given'"], []
+    if ids is None:
+        clauses.append("status = ANY(%s)")
+        params.append(list(OPEN_STATUSES))
+    else:
+        clauses.append("id = ANY(%s)")
+        params.append(ids)
+    if failed_only:
+        clauses.append("check_state = 'failed'")
     with db_cursor() as cur:
-        if ids is None:
-            cur.execute(
-                "UPDATE candidates SET check_state = 'queued', check_error = NULL WHERE status = ANY(%s)",
-                (list(OPEN_STATUSES),),
-            )
-        else:
-            cur.execute(
-                """UPDATE candidates SET check_state = 'queued', check_error = NULL
-                   WHERE id = ANY(%s) AND status <> 'given'""",
-                (ids,),
-            )
+        cur.execute(
+            f"UPDATE candidates SET check_state = 'queued', check_error = NULL WHERE {' AND '.join(clauses)}",
+            params,
+        )
         return cur.rowcount
 
 

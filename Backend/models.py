@@ -141,6 +141,7 @@ class CandidateGiveRequest(BaseModel):
 
 class RecheckRequest(BaseModel):
     ids: list[int] | None = Field(default=None, max_length=1000)
+    failed_only: bool = False  # re-check only rows whose last check failed
 
 
 class TopicCreateRequest(BaseModel):
