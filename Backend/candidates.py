@@ -177,7 +177,7 @@ def assess(text: str, sheet_topics: list[str], topics_now: list[str], confirmed:
     # Steps 3–4 need the AI: fail at once (no retries, no waiting) if the
     # judge model isn't configured, rather than after a slow embedding call.
     if not jg.JUDGE_MODEL:
-        raise CheckFailed("AI check is not configured on the server (GEMINI_JUDGE_MODEL)")
+        raise CheckFailed("The meaning check is not set up on the server (GEMINI_JUDGE_MODEL)")
 
     # Step 3: meaning shortlist.
     vec = emb_text or _to_pgvector(_embed_query(text))
@@ -194,7 +194,7 @@ def assess(text: str, sheet_topics: list[str], topics_now: list[str], confirmed:
             active_topics(),
         )
     except jg.JudgeError as exc:
-        raise CheckFailed(f"AI check failed ({exc})") from exc
+        raise CheckFailed(f"Meaning check failed ({exc})") from exc
 
     # Steps 5–6: result + matches.
     labels = {mid: verdict.labels[mid] for mid in short_ids}
