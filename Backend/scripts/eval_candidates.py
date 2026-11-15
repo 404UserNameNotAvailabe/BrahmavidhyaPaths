@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import sys
 import time
 
@@ -42,7 +43,7 @@ HEADERS = {
 def read_sheet(path: str) -> list[dict]:
     with open(path, encoding="utf-8-sig", newline="") as f:
         rows = list(csv.reader(f))
-    head = [HEADERS.get(h.strip().lower(), "") for h in rows[0]]
+    head = [HEADERS.get(re.sub(r"\(.*\)", "", h).strip().lower(), "") for h in rows[0]]  # "Vishay (Subject)" → vishay
     if "text" not in head:
         sys.exit("No Vakya/text column found in the header row")
     out = []
@@ -56,13 +57,46 @@ def read_sheet(path: str) -> list[dict]:
     return out
 
 
+def use_snapshot(path: str) -> None:
+    """Point the pipeline at an archive snapshot file instead of the DB:
+    archive paths, nearest-by-meaning (in-memory cosine) and the topic list
+    (sql/seed_topics.sql)."""
+    import json
+    import math
+    import os
+    from datetime import date
+
+    snap = json.load(open(path, encoding="utf-8"))
+    paths = [candidates.ArchivePath(r["id"], date.fromisoformat(r["date"]) if r["date"] else None, r["season"],
+                                    r["link"] or "", r["text"], cr.prepare(r["text"])) for r in snap]
+    vecs = {r["id"]: r["embedding"] for r in snap if r.get("embedding")}
+    norms = {k: math.sqrt(sum(x * x for x in v)) for k, v in vecs.items()}
+
+    def nearest(vec: str):
+        q = [float(x) for x in vec.strip("[]").split(",")]
+        qn = math.sqrt(sum(x * x for x in q))
+        sims = sorted(((sum(a * b for a, b in zip(q, v)) / (qn * norms[k]), k) for k, v in vecs.items()), reverse=True)
+        return [(k, s) for s, k in sims[: cr.NEAREST_BY_MEANING]]
+
+    seed = open(os.path.join(os.path.dirname(__file__), "..", "sql", "seed_topics.sql"), encoding="utf-8").read()
+    topics = re.findall(r"\('([^']+)', \d+\)", seed)
+    candidates.archive_paths = lambda: paths
+    candidates._nearest = nearest
+    candidates.active_topics = lambda: topics
+    print(f"snapshot: {len(paths)} paths, {len(vecs)} with embeddings, {len(topics)} topics")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("sheet")
     ap.add_argument("--out", default="eval-report.csv")
     ap.add_argument("--model", help="override GEMINI_JUDGE_MODEL for this run")
     ap.add_argument("--rows", help="only these sheet rows, e.g. 10,15,84")
+    ap.add_argument("--snapshot", help="archive snapshot JSON (id, date, season, link, text, embedding): "
+                    "run without a database — nothing is read from or written to any DB")
     args = ap.parse_args()
+    if args.snapshot:
+        use_snapshot(args.snapshot)
     if args.model:
         judge.JUDGE_MODEL = args.model
     if not judge.JUDGE_MODEL:

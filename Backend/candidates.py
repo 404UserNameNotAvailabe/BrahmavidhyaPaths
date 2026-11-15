@@ -109,6 +109,18 @@ def _embed_query(text: str) -> list[float]:
     raise CheckFailed("Meaning search failed (embedding service unavailable)")
 
 
+def _nearest(vec: str) -> list[tuple[int, float]]:
+    """The 8 archive paths nearest in meaning: [(message_id, cosine similarity)].
+    (scripts/eval_candidates.py swaps this for an in-memory snapshot.)"""
+    with db_cursor() as cur:
+        cur.execute(
+            """SELECT id, 1 - (embedding <=> %s::vector) FROM messages
+               WHERE embedding IS NOT NULL ORDER BY embedding <=> %s::vector LIMIT %s""",
+            (vec, vec, cr.NEAREST_BY_MEANING),
+        )
+        return [(r[0], float(r[1])) for r in cur.fetchall()]
+
+
 def _to_pgvector(vec: list[float]) -> str:
     return "[" + ",".join(repr(float(x)) for x in vec) + "]"
 
@@ -169,13 +181,7 @@ def assess(text: str, sheet_topics: list[str], topics_now: list[str], confirmed:
 
     # Step 3: meaning shortlist.
     vec = emb_text or _to_pgvector(_embed_query(text))
-    with db_cursor() as cur:
-        cur.execute(
-            """SELECT id, 1 - (embedding <=> %s::vector) FROM messages
-               WHERE embedding IS NOT NULL ORDER BY embedding <=> %s::vector LIMIT %s""",
-            (vec, vec, cr.NEAREST_BY_MEANING),
-        )
-        nearest = cur.fetchall()
+    nearest = _nearest(vec)
     sims = {mid: float(sim) for mid, sim in nearest}
     short_ids = cr.shortlist(words, [mid for mid, _ in nearest])
 
