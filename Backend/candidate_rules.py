@@ -91,8 +91,10 @@ def word_compare(candidate: str, path: str) -> WordResult:
 
 # --- 3 (rules part). shortlist for the judge --------------------------------
 
-NEAREST_BY_MEANING = 8
-SHORTLIST_CAP = 12
+# Measured on the spec's 13 known same-message pairs: the true past path is
+# within the 12 nearest for 13/13 (within 8 for 12/13).
+NEAREST_BY_MEANING = 12
+SHORTLIST_CAP = 16
 
 
 def shortlist(word_results: dict[int, WordResult], nearest_ids: list[int]) -> list[int]:
