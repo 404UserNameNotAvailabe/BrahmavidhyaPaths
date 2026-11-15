@@ -22,6 +22,13 @@ from dataclasses import dataclass
 
 from candidate_rules import JUDGE_LABELS, MAX_TOPICS
 
+try:  # read Backend/.env even when judge is imported before config (scripts, one-liners)
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:  # unit tests run without python-dotenv
+    pass
+
 logger = logging.getLogger("brahmavidya.judge")
 
 JUDGE_MODEL = os.getenv("GEMINI_JUDGE_MODEL", "")
