@@ -439,8 +439,9 @@ async def list_candidates(
             cur.execute(
                 f"""SELECT c.id, c.text, c.lang, c.topics, c.verdict, c.check_state, c.status,
                            c.sheet_row, c.duplicate_of, c.topics_confirmed,
-                           cardinality(c.ai_topics) > 0, m.message_date, c.check_error
+                           cardinality(c.ai_topics) > 0, m.message_date, c.check_error, d.sheet_row
                     FROM candidates c
+                    LEFT JOIN candidates d ON d.id = c.duplicate_of
                     LEFT JOIN candidate_matches cm ON cm.candidate_id = c.id AND cm.rank = 1
                     LEFT JOIN messages m ON m.id = cm.message_id
                     {where}
@@ -467,6 +468,7 @@ async def list_candidates(
                     "id": str(r[0]), "text": r[1], "lang": r[2], "topics": r[3] or [], "verdict": r[4],
                     "check_state": r[5], "status": r[6], "sheet_row": r[7],
                     "duplicate_of": str(r[8]) if r[8] else None,
+                    "duplicate_of_row": r[13],
                     "topics_to_confirm": (not r[9]) and bool(r[10]),
                     "closest_date": r[11].isoformat() if r[11] else None,
                     "check_error": r[12],

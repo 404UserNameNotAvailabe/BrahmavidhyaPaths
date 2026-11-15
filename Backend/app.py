@@ -77,6 +77,11 @@ async def lifespan(app: FastAPI):
         candidate_worker.start()
     except Exception:
         logger.warning("Candidate worker did not start", exc_info=True)
+    try:
+        # Repeat flags follow the current rule (cheap: words only, no AI).
+        candidates.refresh_repeats()
+    except Exception:
+        logger.warning("Refreshing pool repeats failed", exc_info=True)
     yield
     # Close the connection pool cleanly on shutdown.
     close_pool()

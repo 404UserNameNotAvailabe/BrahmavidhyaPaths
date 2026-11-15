@@ -172,21 +172,33 @@ def given_reason(kind: str, date_label: str) -> str:
 
 # --- 7. repeats inside the pool ---------------------------------------------
 
-REPEAT_KINDS = ("exact", "contained", "strong")
+# A "strong" word match alone is not a repeat between two pool rows: in short
+# sentences a shared 4-word run of common words ("એ એક જ આપણા") reaches it.
+# It counts only when the shared run is most of the shorter sentence.
+REPEAT_PHRASE_SHARE = 0.6
+
+
+def is_repeat(a: Prepared, b: Prepared) -> bool:
+    """Two pool rows say the same words: equal, one inside the other, or a
+    strong match whose longest shared run covers ≥60% of the shorter one."""
+    ab, ba = compare(a, b), compare(b, a)
+    kinds = {ab.kind, ba.kind}
+    if kinds & {"exact", "contained"}:
+        return True
+    shorter = min(len(a.words), len(b.words))
+    phrase = max(ab.shared_phrase_words, ba.shared_phrase_words)
+    return "strong" in kinds and shorter > 0 and phrase >= REPEAT_PHRASE_SHARE * shorter
 
 
 def find_repeats(rows: list[tuple[int, str]]) -> dict[int, int]:
     """rows = [(sheet_row, text)]. Returns {sheet_row: duplicate_of}, where
-    duplicate_of is the lower sheet_row of a pair the word rules call exact,
-    contained or strong (either direction). Shown, never blocking."""
+    duplicate_of is the lower sheet_row of a pair is_repeat() accepts.
+    Shown, never blocking."""
     out: dict[int, int] = {}
     ordered = [(row, prepare(text)) for row, text in sorted(rows)]
     for i, (row_a, prep_a) in enumerate(ordered):
         for row_b, prep_b in ordered[i + 1:]:
-            if row_b in out:
-                continue
-            kinds = {compare(prep_b, prep_a).kind, compare(prep_a, prep_b).kind}
-            if kinds & set(REPEAT_KINDS):
+            if row_b not in out and is_repeat(prep_a, prep_b):
                 out[row_b] = out.get(row_a, row_a)  # point at the first of a chain
     return out
 
