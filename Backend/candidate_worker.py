@@ -42,12 +42,13 @@ def reset_running() -> int:
 
 
 def used_today() -> int:
-    """AI-judged checks since midnight India time."""
+    """AI-judged checks since midnight India time: pool checks plus one-off
+    checks from the Check page (counted in the audit log)."""
+    since = "(date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata')"
     with db_cursor() as cur:
         cur.execute(
-            """SELECT count(*) FROM candidates
-               WHERE judge_model IS NOT NULL
-                 AND checked_at >= (date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata')"""
+            f"""SELECT (SELECT count(*) FROM candidates WHERE judge_model IS NOT NULL AND checked_at >= {since})
+                     + (SELECT count(*) FROM audit_log WHERE action = 'candidate.ai_check' AND at >= {since})"""
         )
         return cur.fetchone()[0]
 
