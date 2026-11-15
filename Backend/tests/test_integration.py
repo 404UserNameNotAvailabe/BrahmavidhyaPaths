@@ -371,6 +371,44 @@ class Integration(unittest.TestCase):
             judge.judge = candidates.jg.judge = fake_judge
             candidates._embed_query, judge.JUDGE_MODEL = fake_embed, model
 
+    def test_13_season_plan(self):
+        with db_cursor() as cur:
+            ids = []
+            for i, t in enumerate(["યોજના માટેનું પહેલું વાક્ય", "યોજના માટેનું બીજું વાક્ય", "યોજના માટેનું ત્રીજું વાક્ય"]):
+                cur.execute("""INSERT INTO candidates (text, match_key, status, verdict, check_state, target_season, sheet_row)
+                               VALUES (%s, %s, 'approved', 'new', 'done', 2026, %s) RETURNING id""", (t, f"p{i}", 900 + i))
+                ids.append(cur.fetchone()[0])
+        a, b, c = ids
+        plan = lambda cid, d, role="editor", **kw: self.api("POST", f"/candidates/{cid}/plan", role, json={"date": d, **kw})[1]
+        self.assertEqual(plan(a, "2026-12-26", role="viewer"), {"detail": "Insufficient permissions"})
+        r0 = plan(a, "2026-12-26"); self.assertEqual(r0["status"], "success", r0)
+        # one path per day: a second one is refused, unless replace
+        r = plan(b, "2026-12-26")
+        self.assertEqual((r["status"], r["conflict"]), ("error", str(a)))
+        self.assertEqual(plan(b, "2026-12-26", replace=True)["status"], "success")
+        # wrong season / outside the window / a day already given in the archive
+        self.assertIn("approved for 2026", plan(c, "2025-12-20")["message"])
+        self.assertNotEqual(self.api("POST", f"/candidates/{c}/plan", "editor", json={"date": "2026-11-30"})[0], 200)
+        with db_cursor() as cur:
+            cur.execute("INSERT INTO messages (message_text, message_date) VALUES ('પહેલેથી અપાયેલો પાઠ યોજનામાં', '2026-12-28')")
+        self.assertIn("already given", plan(c, "2026-12-28")["message"])
+        self.assertEqual(plan(c, "2026-12-27")["status"], "success")
+        d = self.api("GET", "/plan?season=2026", "viewer")[1]["data"]
+        days = {x["date"]: x for x in d["days"]}
+        self.assertEqual((len(d["days"]), d["days"][0]["date"], d["days"][-1]["date"]), (30, "2026-12-16", "2027-01-14"))
+        self.assertEqual(days["2026-12-26"]["candidate"]["id"], str(b))
+        self.assertEqual(days["2026-12-27"]["candidate"]["id"], str(c))
+        self.assertIsNotNone(days["2026-12-28"]["given"])
+        self.assertIn(str(a), [w["id"] for w in d["waiting"]])  # replaced → back to waiting
+        self.assertGreaterEqual(d["filled"], 3)
+        # leaving "approved" frees the day; unplanning works
+        self.api("POST", f"/candidates/{b}/status", "admin", json={"status": "rejected", "note": "test"})
+        self.assertIsNone({x["date"]: x for x in self.api("GET", "/plan?season=2026", "viewer")[1]["data"]["days"]}["2026-12-26"]["candidate"])
+        self.assertEqual(plan(c, None)["status"], "success")
+        self.assertEqual(self.cand(c)["plan_date"], None)
+        # rejected can't be planned
+        self.assertIn("Only an approved", plan(b, "2026-12-29")["message"])
+
     def test_11_background_thread(self):
         import time
 
