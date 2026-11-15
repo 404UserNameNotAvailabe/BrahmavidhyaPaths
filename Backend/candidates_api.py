@@ -218,6 +218,9 @@ async def import_candidates(payload: CandidateImportRequest, user: dict = Depend
             if a["errors"]:
                 errors.append({"row": a["sheet_row"] or a["index"] + 1, "message": "; ".join(a["errors"])})
                 continue
+            if a["in_pool"]:  # same text (or same words, spacing aside) already in the pool
+                skipped += 1
+                continue
             given = a["archive"] and a["archive"]["kind"] in ("exact", "contained")
             status, note = ("rejected", f"Given on {a['archive']['date']}") if given else ("pending", None)
             try:
@@ -499,6 +502,13 @@ async def set_candidate_status(candidate_id: int, payload: CandidateStatusReques
             current, verdict = row
             if current == "given":
                 return {"status": "error", "message": "This candidate has already been given"}
+            # Once an admin has approved or rejected it, only an admin changes it.
+            if current in ("approved", "rejected") and not _has_role(user, "admin"):
+                return {"status": "error", "message": f"Only an admin can change an {current} candidate"}
+            if target == "approved" and verdict is None:
+                return {"status": "error", "message": "Wait for the check to finish before approving"}
+            if target == "approved" and verdict == "given":
+                return {"status": "error", "message": "This was already given; it cannot be approved again"}
             if target == "rejected" and not note and verdict != "given":
                 return {"status": "error", "message": "Add a note saying why it is rejected"}
             season = (payload.target_season or taxonomy.upcoming_season()) if target == "approved" else None

@@ -22,6 +22,14 @@ os.environ.setdefault("CANDIDATE_WORKER", "off")
 os.environ["GEMINI_API_KEY"] = ""
 os.environ["GOOGLE_CLOUD_PROJECT"] = ""
 
+import config  # noqa: E402  (loads Backend/.env — which on the server is Neon)
+
+if config.DB_HOST not in ("127.0.0.1", "localhost", "::1") or not config.DB_NAME.startswith("bvtest"):
+    raise SystemExit(
+        f"REFUSING: integration tests DROP the whole schema. DB_HOST must be local and DB_NAME must "
+        f"start with 'bvtest' (got host={config.DB_HOST!r} db={config.DB_NAME!r})."
+    )
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 import auth  # noqa: E402
@@ -95,7 +103,8 @@ class Integration(unittest.TestCase):
                 tok, _ = auth.create_session(cur, uid)
                 cls.tokens[role] = tok
         cls.fake = FakeJudge()
-        cls._orig = (judge.judge, candidates._embed_query)
+        cls._orig = (judge.judge, candidates._embed_query, judge.JUDGE_MODEL)
+        judge.JUDGE_MODEL = "fake-judge"
         judge.judge = cls.fake
         candidates.jg.judge = cls.fake
         candidates._embed_query = lambda text: vec_for(text)
@@ -103,7 +112,7 @@ class Integration(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        judge.judge, candidates._embed_query = cls._orig
+        judge.judge, candidates._embed_query, judge.JUDGE_MODEL = cls._orig
         cls.client.__exit__(None, None, None)
 
     # --- helpers ---
@@ -320,6 +329,47 @@ class Integration(unittest.TestCase):
         cid = self.find(self.t_given)
         self.assertEqual(self.api("DELETE", f"/candidates/{cid}", "editor")[0], 403)
         self.assertEqual(self.api("DELETE", f"/candidates/{cid}", "admin")[1]["status"], "success")
+
+    def test_10b_role_rules(self):
+        with db_cursor() as cur:
+            cur.execute("INSERT INTO candidates (text, match_key, status) VALUES ('ભૂમિકા પરીક્ષણ માટેનું વાક્ય', 'r', 'rejected') RETURNING id")
+            cid = cur.fetchone()[0]
+        # An editor cannot reopen what an admin rejected.
+        self.assertEqual(self.api("POST", f"/candidates/{cid}/status", "editor", json={"status": "shortlisted"})[1]["status"], "error")
+        # Approving needs a finished check.
+        self.assertIn("Wait for the check", self.api("POST", f"/candidates/{cid}/status", "admin", json={"status": "approved"})[1]["message"])
+
+    def test_12_no_credentials_real_path(self):
+        """Spec: with model credentials removed, rows end failed, the list says
+        Check failed, and only a word-rule given gets a result. Uses the REAL
+        embedding + judge code (no fakes), with no Google credentials."""
+        import time
+
+        fake_judge, fake_embed, model = judge.judge, candidates._embed_query, judge.JUDGE_MODEL
+        judge.judge = candidates.jg.judge = self._orig[0]
+        candidates._embed_query = self._orig[1]
+        try:
+            given_text = "અહો! " + self.by_date["2023-01-02"]["message"]
+            with db_cursor() as cur:
+                cur.execute("INSERT INTO candidates (text, match_key) VALUES ('ક્રેડેન્શિયલ વગરનું પરીક્ષણ વાક્ય', 'z') RETURNING id")
+                a = cur.fetchone()[0]
+                cur.execute("INSERT INTO candidates (text, match_key) VALUES (%s, 'g') RETURNING id", (given_text,))
+                g = cur.fetchone()[0]
+            for model_name, expect in (("", "GEMINI_JUDGE_MODEL"), ("some-model", "Meaning search is not configured")):
+                judge.JUDGE_MODEL = model_name
+                candidates.queue([a])
+                t0 = time.monotonic()
+                self.drain()
+                self.assertLess(time.monotonic() - t0, 3, "must fail fast, not wait on retries")
+                c = self.cand(a)
+                self.assertEqual((c["check_state"], c["verdict"]), ("failed", None))
+                self.assertIn(expect, c["check_error"])
+            self.assertEqual(self.cand(g)["verdict"], "given")  # words need no AI
+            listed = {e["id"]: e for e in self.api("GET", "/candidates?limit=200", "viewer")[1]["data"]["entries"]}
+            self.assertEqual(listed[str(a)]["check_state"], "failed")
+        finally:
+            judge.judge = candidates.jg.judge = fake_judge
+            candidates._embed_query, judge.JUDGE_MODEL = fake_embed, model
 
     def test_11_background_thread(self):
         import time

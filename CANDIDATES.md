@@ -23,7 +23,9 @@ The worker (`candidate_worker.py`) uses `candidates.check_state` as its queue, s
 | Where candidates live | own tables (`candidates`, `candidate_matches`, `topics`) | `sql/schema.sql` |
 | Results shown | 4 labels + shared-word numbers + a reason; never a % for meaning | spec |
 | Topics | the team's 25 Vishay, stored as tag values; 1–2 per path | `sql/seed_topics.sql` |
-| Approval | editor: pending ↔ shortlisted; admin: approve / reject (reject needs a note unless already given) | `candidates_api.STATUS_ROLE` |
+| Approval | editor: pending ↔ shortlisted; admin: approve / reject (reject needs a note unless already given). Once approved or rejected, only an admin changes it. Approve needs a finished check and is refused for "Already given". Editors mark an approved candidate as given | `candidates_api.set_candidate_status` |
+| No AI configured | a candidate the words don't settle fails at once ("AI check is not configured"), never waits on retries, never becomes "New" | `candidates.assess` |
+| AI reply slightly off | a reason over 25 words is trimmed and a third topic dropped (not a failure); wrong ids, labels or topics fail and retry once | `judge.validate` |
 | AI | Vertex AI (private, paid tier), model from `GEMINI_JUDGE_MODEL`, chosen by `scripts/eval_candidates.py` | env |
 | Daily cap | `JUDGE_DAILY_CALL_LIMIT=300` AI-judged checks per India day (first load ≈ 160) | env |
 | Duplicate key | punctuation-free on both `messages` and `candidates` (v2, Nov 2026) | `schema.sql` |
@@ -36,6 +38,6 @@ Only the candidate text, up to 12 archive paths (public on baps.org) and the top
 
 ## Run / test
 - Unit tests: `cd Backend && python3 -m unittest discover -s tests -t .`
-- Integration tests (throwaway DB only): see `tests/test_integration.py` docstring.
+- Integration tests (throwaway DB only — they refuse any host that isn't local or a DB not named `bvtest*`): see `tests/test_integration.py` docstring.
 - Accuracy: `python -m scripts.eval_candidates sheet.csv --model <model>`.
 - Archive topics: `python -m scripts.backfill_topics --dry-run`, then for real after the team agrees.

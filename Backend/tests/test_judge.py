@@ -54,16 +54,18 @@ class Validate(unittest.TestCase):
         m = json.loads(reply())["matches"]; m[0]["label"] = "duplicate"
         self.bad(reply(matches=m))
 
-    def test_long_reason(self):
-        m = json.loads(reply())["matches"]; m[0]["reason"] = "word " * 26
-        self.bad(reply(matches=m))
+    def test_long_reason_is_trimmed(self):
+        m = json.loads(reply())["matches"]; m[0]["reason"] = "word " * 30
+        v = j.validate(reply(matches=m), SHORT, TOPICS)
+        self.assertEqual(len(v.labels[480][1].split()), 25)
 
     def test_topic_not_in_list(self):
         self.bad(reply(topics=["ધ્યાન"]))
 
     def test_topic_count(self):
         self.bad(reply(topics=[]))
-        self.bad(reply(topics=["સમર્પણ", "સંપ", "પ્રાપ્તિનો વિચાર"]))
+        v = j.validate(reply(topics=["સમર્પણ", "સંપ", "પ્રાપ્તિનો વિચાર"]), SHORT, TOPICS)
+        self.assertEqual(v.topics, ["સમર્પણ", "સંપ"])
 
 
 class Judge(unittest.TestCase):

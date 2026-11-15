@@ -110,8 +110,11 @@ def validate(raw: str, shortlist: list[PathRow], topics: list[str]) -> Verdict:
             raise JudgeError("message_id labelled twice")
         if label not in JUDGE_LABELS:
             raise JudgeError("unknown label")
-        if not reason or len(reason.split()) > REASON_MAX_WORDS:
-            raise JudgeError("reason missing or too long")
+        if not reason:
+            raise JudgeError("reason missing")
+        words = reason.split()
+        if len(words) > REASON_MAX_WORDS:  # keep it, trimmed — not worth a retry
+            reason = " ".join(words[:REASON_MAX_WORDS]).rstrip(",;:") + "…"
         labels[mid] = (label, reason)
     if set(labels) != wanted:
         raise JudgeError("not every shortlisted path was labelled")
@@ -124,9 +127,9 @@ def validate(raw: str, shortlist: list[PathRow], topics: list[str]) -> Verdict:
             raise JudgeError("topic not in the list")
         if t not in picked:
             picked.append(t)
-    if not 1 <= len(picked) <= MAX_TOPICS:
-        raise JudgeError("need 1 or 2 topics")
-    return Verdict(labels, picked)
+    if not picked:
+        raise JudgeError("no topic chosen")
+    return Verdict(labels, picked[:MAX_TOPICS])  # a third topic is dropped, not an error
 
 
 def _vertex_generate(prompt: str) -> str:

@@ -32,6 +32,8 @@ ROLES = ("viewer", "editor", "admin")
 # uvicorn configures only its own loggers; without this, INFO lines from the
 # app (e.g. "Schema ensured.", each candidate check) never reach the journal.
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+for _noisy in ("httpx", "httpcore", "google_genai", "google.auth", "urllib3"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger("brahmavidya.app")
 
 SCHEMA_SQL = Path(__file__).resolve().parent / "sql" / "schema.sql"

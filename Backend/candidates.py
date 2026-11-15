@@ -98,6 +98,8 @@ def best_word_hit(prep: cr.Prepared, paths: list[ArchivePath]) -> tuple[ArchiveP
 def _embed_query(text: str) -> list[float]:
     import embeddings  # lazy: config + SDK
 
+    if not embeddings.is_enabled():
+        raise CheckFailed("Meaning search is not configured on the server")
     for attempt in range(1, EMBED_RETRIES + 1):
         vec = embeddings.embed_query(text)
         if vec is not None:
@@ -159,6 +161,11 @@ def assess(text: str, sheet_topics: list[str], topics_now: list[str], confirmed:
         top = kept[0]
         reason = cr.given_reason(top["word_kind"], date_label(by_id[top["message_id"]].date))
         return Assessment("given", reason, kept, None, topics_now, confirmed, None, None)
+
+    # Steps 3–4 need the AI: fail at once (no retries, no waiting) if the
+    # judge model isn't configured, rather than after a slow embedding call.
+    if not jg.JUDGE_MODEL:
+        raise CheckFailed("AI check is not configured on the server (GEMINI_JUDGE_MODEL)")
 
     # Step 3: meaning shortlist.
     vec = emb_text or _to_pgvector(_embed_query(text))
