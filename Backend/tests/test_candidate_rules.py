@@ -162,3 +162,29 @@ class ImportHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResolveTopics(unittest.TestCase):
+    def test_agree(self):
+        self.assertEqual(cr.resolve_topics(["સેવા", "સંપ"], ["સંપ", "સેવા"], ["સેવા", "સંપ"], False), (["સેવા", "સંપ"], True))
+
+    def test_no_sheet(self):
+        self.assertEqual(cr.resolve_topics([], ["સંપ"], [], False), (["સંપ"], False))
+
+    def test_differ_keeps_sheet(self):
+        self.assertEqual(cr.resolve_topics(["માન-અપમાન"], ["સમજણ"], ["માન-અપમાન"], False), (["માન-અપમાન"], False))
+
+    def test_person_choice_kept(self):
+        self.assertEqual(cr.resolve_topics(["માન-અપમાન"], ["સમજણ"], ["સમજણ"], True), (["સમજણ"], True))
+
+
+class Speed(unittest.TestCase):
+    def test_preview_scale(self):
+        import time
+        paths = [cr.prepare(f"સત્સંગ સેવા ભક્તિ મહિમા વાક્ય નંબર {i} અહીં લખેલું છે") for i in range(270)]
+        cands = [cr.prepare(f"ઉમેદવાર વાક્ય {i} સત્સંગ અને સેવા વિશે છે") for i in range(163)]
+        t = time.perf_counter()
+        for c in cands:
+            for p in paths:
+                cr.compare(c, p)
+        self.assertLess(time.perf_counter() - t, 5.0)

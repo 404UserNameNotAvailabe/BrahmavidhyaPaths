@@ -176,3 +176,100 @@ DROP TRIGGER IF EXISTS trg_messages_updated_at ON messages;
 CREATE TRIGGER trg_messages_updated_at
     BEFORE UPDATE ON messages
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- ===========================================================================
+-- Candidates (Nov 2026): a pool of not-yet-approved sentences, each checked
+-- against the archive by words, meaning and an AI judge. Kept apart from
+-- `messages` so the archive stays clean. Seed data lives in
+-- sql/seed_topics.sql, never here.
+-- ===========================================================================
+
+-- Controlled list of topics (Vishay). A topic name is also a tag value.
+CREATE TABLE IF NOT EXISTS topics (
+    id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name        text UNIQUE NOT NULL CHECK (btrim(name) <> ''),
+    sort_order  int NOT NULL DEFAULT 0,
+    is_active   boolean NOT NULL DEFAULT true,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- Lets the Archive show which rows still need a person to confirm topics.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS tags_reviewed boolean NOT NULL DEFAULT false;
+
+CREATE TABLE IF NOT EXISTS candidates (
+    id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    text             text NOT NULL CHECK (btrim(text) <> ''),
+    -- Same duplicate key as messages.normalized_text (v2, punctuation-free).
+    normalized_text  text GENERATED ALWAYS AS (lower(btrim(regexp_replace(
+                       regexp_replace(text, $re$[]\\.,!?;:'"“”‘’(){}[|/=+*&%#@~`^<>_–—…।॥-]$re$, ' ', 'g'),
+                       '\s+', ' ', 'g')))) STORED,
+    match_key        text NOT NULL,              -- candidate_rules.match_key(text), set by the API
+    lang             text,                       -- gu | hi | en | mixed
+    topics           text[] NOT NULL DEFAULT '{}',  -- current topics, first = primary
+    sheet_topics     text[] NOT NULL DEFAULT '{}',  -- as imported
+    ai_topics        text[] NOT NULL DEFAULT '{}',  -- as assigned by the judge
+    topics_confirmed boolean NOT NULL DEFAULT false,
+    ref              text,                       -- scripture / book reference from the sheet
+    collection       text,                       -- e.g. 'Unused sentences'
+    sheet_row        int,                        -- the sheet's No column
+    duplicate_of     bigint REFERENCES candidates(id) ON DELETE SET NULL,
+    status           text NOT NULL DEFAULT 'pending',
+    status_note      text,
+    status_by        text,
+    status_at        timestamptz,
+    target_season    int,                        -- season start year once approved
+    plan_date        date,                       -- later phase (season plan)
+    verdict          text,                       -- given | same | similar | new
+    verdict_reason   text,
+    check_state      text NOT NULL DEFAULT 'queued',  -- queued | running | done | failed
+    check_error      text,
+    checked_at       timestamptz,
+    judge_model      text,                       -- which model judged (null = words only)
+    embedding        vector(768),
+    message_id       bigint REFERENCES messages(id) ON DELETE SET NULL,  -- set when given
+    created_by       text,
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    updated_at       timestamptz NOT NULL DEFAULT now()
+);
+
+DO $$ BEGIN
+    ALTER TABLE candidates ADD CONSTRAINT ck_candidates_status
+        CHECK (status IN ('pending','shortlisted','approved','rejected','given'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER TABLE candidates ADD CONSTRAINT ck_candidates_verdict
+        CHECK (verdict IS NULL OR verdict IN ('given','same','similar','new'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+    ALTER TABLE candidates ADD CONSTRAINT ck_candidates_check_state
+        CHECK (check_state IN ('queued','running','done','failed'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_candidates_normalized ON candidates (normalized_text);
+CREATE INDEX IF NOT EXISTS ix_candidates_match_key   ON candidates (match_key);
+CREATE INDEX IF NOT EXISTS ix_candidates_status      ON candidates (status);
+CREATE INDEX IF NOT EXISTS ix_candidates_verdict     ON candidates (verdict);
+CREATE INDEX IF NOT EXISTS ix_candidates_check_state ON candidates (check_state, id);
+CREATE INDEX IF NOT EXISTS ix_candidates_checked_at  ON candidates (checked_at);
+CREATE INDEX IF NOT EXISTS ix_candidates_topics      ON candidates USING gin (topics);
+
+DROP TRIGGER IF EXISTS trg_candidates_updated_at ON candidates;
+CREATE TRIGGER trg_candidates_updated_at
+    BEFORE UPDATE ON candidates
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- One row per (candidate, archive path) worth showing (up to 5).
+CREATE TABLE IF NOT EXISTS candidate_matches (
+    id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    candidate_id        bigint NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+    message_id          bigint NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    rank                int NOT NULL,
+    word_kind           text NOT NULL,   -- exact | contained | strong | some | weak | none
+    overlap_pct         int NOT NULL,
+    shared_phrase_words int NOT NULL,
+    semantic_sim        real,            -- ordering/debugging only, never shown
+    judge               text,            -- same_sentence | same_message | similar | different
+    judge_reason        text,
+    UNIQUE (candidate_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS ix_candidate_matches_candidate ON candidate_matches (candidate_id, rank);

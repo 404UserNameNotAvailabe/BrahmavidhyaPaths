@@ -52,24 +52,41 @@ class WordResult:
     shared_phrase_words: int  # longest run of shared consecutive words
 
 
+@dataclass(frozen=True)
+class Prepared:
+    """A text tokenised once, so 163 × 270 comparisons stay fast."""
+    words: tuple[str, ...]
+    word_set: frozenset[str]
+    key: str
+
+
+def prepare(text: str) -> Prepared:
+    words = tuple(matching.token_list(text))
+    return Prepared(words, frozenset(words), match_key(text))
+
+
+def compare(c: Prepared, p: Prepared) -> WordResult:
+    """word_compare on prepared texts (candidate c vs archive path p)."""
+    if c.key and c.key == p.key:
+        return WordResult("exact", 100 if c.words else 0, len(c.words))
+    contained = bool(c.key and p.key) and (
+        (c.key in p.key and len(c.words) >= CONTAINED_MIN_WORDS)
+        or (p.key in c.key and len(p.words) >= CONTAINED_MIN_WORDS)
+    )
+    shared = c.word_set & p.word_set
+    if not shared and not contained:
+        return WordResult("none", 0, 0)  # no shared word: skip the phrase DP
+    pct = round(len(shared) / len(c.word_set) * 100) if c.word_set else 0
+    phrase = matching.longest_shared_phrase(list(c.words), list(p.words))
+    if contained:
+        return WordResult("contained", pct, phrase)
+    cov = len(shared) / len(c.word_set)
+    return WordResult(matching.overlap_kind(cov, phrase, len(c.words)), pct, phrase)
+
+
 def word_compare(candidate: str, path: str) -> WordResult:
     """Compare one candidate with one archive path by words only."""
-    c_words = matching.token_list(candidate)
-    p_words = matching.token_list(path)
-    cov = matching.coverage(set(c_words), set(p_words))
-    phrase = matching.longest_shared_phrase(c_words, p_words)
-    pct = round(cov * 100)
-
-    ck, pk = match_key(candidate), match_key(path)
-    if ck and ck == pk:
-        kind = "exact"
-    elif ck and pk and ck in pk and len(c_words) >= CONTAINED_MIN_WORDS:
-        kind = "contained"  # the candidate sits inside the path
-    elif ck and pk and pk in ck and len(p_words) >= CONTAINED_MIN_WORDS:
-        kind = "contained"  # the path sits inside the candidate
-    else:
-        kind = matching.overlap_kind(cov, phrase, len(c_words))
-    return WordResult(kind, pct, phrase)
+    return compare(prepare(candidate), prepare(path))
 
 
 # --- 3 (rules part). shortlist for the judge --------------------------------
@@ -161,12 +178,12 @@ def find_repeats(rows: list[tuple[int, str]]) -> dict[int, int]:
     duplicate_of is the lower sheet_row of a pair the word rules call exact,
     contained or strong (either direction). Shown, never blocking."""
     out: dict[int, int] = {}
-    ordered = sorted(rows)
-    for i, (row_a, text_a) in enumerate(ordered):
-        for row_b, text_b in ordered[i + 1:]:
+    ordered = [(row, prepare(text)) for row, text in sorted(rows)]
+    for i, (row_a, prep_a) in enumerate(ordered):
+        for row_b, prep_b in ordered[i + 1:]:
             if row_b in out:
                 continue
-            kinds = {word_compare(text_b, text_a).kind, word_compare(text_a, text_b).kind}
+            kinds = {compare(prep_b, prep_a).kind, compare(prep_a, prep_b).kind}
             if kinds & set(REPEAT_KINDS):
                 out[row_b] = out.get(row_a, row_a)  # point at the first of a chain
     return out
@@ -226,3 +243,19 @@ def detect_lang(text: str) -> str:
     """gu | hi | en | mixed, from the scripts present."""
     found = [code for code, rx in (("gu", _GU), ("hi", _HI), ("en", _EN)) if rx.search(text or "")]
     return found[0] if len(found) == 1 else ("mixed" if found else "en")
+
+
+def resolve_topics(sheet: list[str], ai: list[str], current: list[str], confirmed: bool) -> tuple[list[str], bool]:
+    """Current topics + confirmed flag after the judge returns ai topics.
+    A person's choice (confirmed) is never overwritten. Sheet and AI agree
+    (same set) → sheet order, confirmed. No sheet topic → the AI's, to
+    confirm. They differ → keep the sheet's, a person chooses."""
+    if confirmed:
+        return current, True
+    if not ai:
+        return (current or sheet), False
+    if not sheet:
+        return list(ai), False
+    if set(sheet) == set(ai):
+        return list(sheet), True
+    return list(sheet), False
