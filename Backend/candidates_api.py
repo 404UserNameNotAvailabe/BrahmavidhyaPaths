@@ -317,7 +317,7 @@ async def check_one(payload: CheckRequest, user: dict = Depends(auth.get_current
         if pooled:
             return {"status": "success", "data": {"in_pool": pooled}}
         if candidate_worker.used_today() >= candidate_worker.DAILY_LIMIT:
-            return {"status": "error", "message": "Today's AI check limit is reached. Try again tomorrow."}
+            return {"status": "error", "message": "Today's check limit is reached. Try again tomorrow."}
         a = await run_in_threadpool(cands.assess, text, [], [], False)
     except cands.CheckFailed as exc:
         return {"status": "error", "message": str(exc)}

@@ -232,7 +232,7 @@ class Integration(unittest.TestCase):
 
         f = self.cand(self.find(self.t_fail))
         self.assertEqual((f["check_state"], f["verdict"]), ("failed", None))
-        self.assertIn("AI check failed", f["check_error"])
+        self.assertIn("Meaning check failed", f["check_error"])
 
     def test_04_list_counts_and_filters(self):
         code, body = self.api("GET", "/candidates", "viewer")
