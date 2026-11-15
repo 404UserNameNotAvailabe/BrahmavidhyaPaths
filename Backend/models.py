@@ -152,3 +152,12 @@ class TopicUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=60)
     sort_order: int | None = None
     is_active: bool | None = None
+
+
+class PlanRequest(BaseModel):
+    """Body for POST /candidates/{id}/plan — put an approved candidate on a day
+    (date) or take it off the plan (date = null). replace=true moves whatever
+    is planned on that day back to the waiting list."""
+
+    date: SeasonDate = None
+    replace: bool = False

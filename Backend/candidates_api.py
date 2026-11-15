@@ -8,6 +8,7 @@ calls a model: AI work happens in candidate_worker.
 from __future__ import annotations
 
 import logging
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends
 
@@ -25,6 +26,7 @@ from models import (
     CandidateImportRequest,
     CandidateStatusRequest,
     CandidateUpdateRequest,
+    PlanRequest,
     RecheckRequest,
     TopicCreateRequest,
     TopicUpdateRequest,
@@ -362,7 +364,8 @@ async def get_candidate(candidate_id: int, user: dict = Depends(auth.get_current
             cur.execute(
                 """SELECT id, text, lang, topics, sheet_topics, ai_topics, topics_confirmed, ref, collection,
                           sheet_row, duplicate_of, status, status_note, status_by, status_at, target_season,
-                          verdict, verdict_reason, check_state, check_error, checked_at, message_id, created_by
+                          verdict, verdict_reason, check_state, check_error, checked_at, message_id, created_by,
+                          plan_date
                    FROM candidates WHERE id = %s""",
                 (candidate_id,),
             )
@@ -424,6 +427,7 @@ async def get_candidate(candidate_id: int, user: dict = Depends(auth.get_current
             "target_season": c[15], "verdict": c[16], "verdict_reason": c[17], "check_state": c[18],
             "check_error": c[19], "checked_at": c[20].isoformat() if c[20] else None,
             "message_id": str(c[21]) if c[21] else None, "created_by": c[22],
+            "plan_date": c[23].isoformat() if c[23] else None,
             "matches": matches, "topic_history": history, "duplicate": duplicate,
         },
     }
@@ -512,10 +516,13 @@ async def set_candidate_status(candidate_id: int, payload: CandidateStatusReques
             if target == "rejected" and not note and verdict != "given":
                 return {"status": "error", "message": "Add a note saying why it is rejected"}
             season = (payload.target_season or taxonomy.upcoming_season()) if target == "approved" else None
+            # Leaving "approved" also frees the day it was planned on.
             cur.execute(
                 """UPDATE candidates SET status = %s, status_note = %s, status_by = %s, status_at = now(),
-                          target_season = %s WHERE id = %s""",
-                (target, note, user["username"], season, candidate_id),
+                          target_season = %s,
+                          plan_date = CASE WHEN %s = 'approved' THEN plan_date ELSE NULL END
+                   WHERE id = %s""",
+                (target, note, user["username"], season, target, candidate_id),
             )
     except Exception:
         return fail()
@@ -587,3 +594,123 @@ async def delete_candidate(candidate_id: int, user: dict = Depends(auth.require_
         return {"status": "error", "message": "Candidate not found"}
     audit.record(user["username"], "candidate.delete", f"id={candidate_id}")
     return {"status": "success"}
+
+
+# --- season plan ------------------------------------------------------------
+
+SEASON_DAYS = 30
+
+
+def season_days(season: int) -> list[date]:
+    """The 30 days of a Dhanurmas season: 16 Dec <season> → 14 Jan <season+1>."""
+    start = date(season, 12, 16)
+    return [start + timedelta(days=i) for i in range(SEASON_DAYS)]
+
+
+def season_of(d: date) -> int:
+    return d.year if d.month == 12 else d.year - 1
+
+
+@router.get("/plan")
+async def get_plan(season: int | None = None, user: dict = Depends(auth.get_current_user)):
+    """The 30 days of a season with what is planned or already given on each,
+    the approved candidates still waiting for a day, and topic coverage."""
+    season = season or taxonomy.upcoming_season()
+    days = season_days(season)
+    first, last = days[0], days[-1]
+    try:
+        with db_cursor() as cur:
+            cur.execute(
+                """SELECT id, text, lang, topics, sheet_row, status, plan_date FROM candidates
+                   WHERE plan_date BETWEEN %s AND %s AND status IN ('approved', 'given')""",
+                (first, last),
+            )
+            planned = {r[6]: r for r in cur.fetchall()}
+            cur.execute(
+                "SELECT id, message_text, message_date, tags, link FROM messages WHERE message_date BETWEEN %s AND %s",
+                (first, last),
+            )
+            given = {r[2]: r for r in cur.fetchall()}
+            cur.execute(
+                """SELECT id, text, lang, topics, sheet_row, target_season FROM candidates
+                   WHERE status = 'approved' AND plan_date IS NULL
+                     AND (target_season = %s OR target_season IS NULL)
+                   ORDER BY sheet_row NULLS LAST, id""",
+                (season,),
+            )
+            waiting = cur.fetchall()
+            cur.execute("SELECT name FROM topics WHERE is_active ORDER BY sort_order, id")
+            topic_names = [r[0] for r in cur.fetchall()]
+    except Exception:
+        return fail()
+
+    def cand(r):
+        return {"id": str(r[0]), "text": r[1], "lang": r[2], "topics": r[3] or [], "sheet_row": r[4]}
+
+    out_days, covered = [], set()
+    for i, d in enumerate(days, 1):
+        c, m = planned.get(d), given.get(d)
+        if c:
+            covered.update(c[3] or [])
+        if m:
+            covered.update(m[3] or [])
+        out_days.append({
+            "day": i,
+            "date": d.isoformat(),
+            "weekday": d.strftime("%a"),
+            "candidate": (cand(c) | {"status": c[5]}) if c else None,
+            "given": {"id": str(m[0]), "text": m[1], "topics": m[3] or [], "link": m[4] or ""} if m else None,
+        })
+    return {
+        "status": "success",
+        "data": {
+            "season": season,
+            "days": out_days,
+            "waiting": [cand(r) for r in waiting],
+            "filled": sum(1 for x in out_days if x["candidate"] or x["given"]),
+            "topics": {
+                "covered": [t for t in topic_names if t in covered],
+                "missing": [t for t in topic_names if t not in covered],
+            },
+        },
+    }
+
+
+@router.post("/candidates/{candidate_id}/plan")
+async def plan_candidate(candidate_id: int, payload: PlanRequest, user: dict = Depends(auth.require_editor)):
+    """Put an approved candidate on a day of its season, or take it off."""
+    try:
+        with db_transaction() as cur:
+            cur.execute("SELECT status, target_season FROM candidates WHERE id = %s FOR UPDATE", (candidate_id,))
+            row = cur.fetchone()
+            if row is None:
+                return {"status": "error", "message": "Candidate not found"}
+            status, target = row
+            if status != "approved":
+                return {"status": "error", "message": "Only an approved candidate can be planned"}
+            d = payload.date
+            if d is not None:
+                if target and season_of(d) != target:
+                    return {"status": "error", "message": f"This candidate is approved for {target}–{str(target + 1)[2:]}"}
+                cur.execute("SELECT 1 FROM messages WHERE message_date = %s", (d,))
+                if cur.fetchone():
+                    return {"status": "error", "message": "A path was already given on that day"}
+                cur.execute(
+                    """SELECT id, sheet_row, status FROM candidates
+                       WHERE plan_date = %s AND status IN ('approved', 'given') AND id <> %s FOR UPDATE""",
+                    (d, candidate_id),
+                )
+                other = cur.fetchone()
+                if other:
+                    if other[2] == "given" or not payload.replace:
+                        label = f"#{other[1]}" if other[1] is not None else "another candidate"
+                        return {"status": "error", "message": f"That day is already planned with {label}", "conflict": str(other[0])}
+                    cur.execute("UPDATE candidates SET plan_date = NULL WHERE id = %s", (other[0],))
+            cur.execute(
+                "UPDATE candidates SET plan_date = %s, target_season = COALESCE(target_season, %s) WHERE id = %s",
+                (d, season_of(d) if d else None, candidate_id),
+            )
+    except Exception:
+        return fail()
+    audit.record(user["username"], "candidate.plan", f"id={candidate_id} → {payload.date or 'unplanned'}")
+    return {"status": "success", "data": {"date": payload.date.isoformat() if payload.date else None}}

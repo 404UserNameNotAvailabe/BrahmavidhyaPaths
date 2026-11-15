@@ -273,3 +273,7 @@ CREATE TABLE IF NOT EXISTS candidate_matches (
     UNIQUE (candidate_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS ix_candidate_matches_candidate ON candidate_matches (candidate_id, rank);
+
+-- Season plan: at most one path per day (approved = planned, given = done).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_candidates_plan_date ON candidates (plan_date)
+    WHERE plan_date IS NOT NULL AND status IN ('approved', 'given');
