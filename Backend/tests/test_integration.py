@@ -457,6 +457,57 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.drain(), 1)
         self.assertEqual(self.cand(cid)["check_state"], "done")
 
+    def test_10e_undo_given(self):
+        """Undo Mark as given: back to approved; the archive row goes only if the give created it."""
+        def approved(text):
+            with db_cursor() as cur:
+                cur.execute("""INSERT INTO candidates (text, match_key, status, verdict, check_state)
+                               VALUES (%s, %s, 'approved', 'new', 'done') RETURNING id""", (text, text))
+                return cur.fetchone()[0]
+        give = lambda cid, d: self.api("POST", f"/candidates/{cid}/give", "editor",
+                                       json={"message_date": d, "link": "https://www.baps.org/u.jpg"})[1]
+        a = approved("ભૂલથી અપાયેલો પાઠ પાછો લેવાનો છે")
+        mid = int(give(a, "2025-12-21")["data"]["message_id"])
+        # Editors can't undo; admins can.
+        self.assertEqual(self.api("POST", f"/candidates/{a}/ungive", "editor")[0], 403)
+        body = self.api("POST", f"/candidates/{a}/ungive", "admin")[1]
+        self.assertEqual(body["data"], {"archive_removed": True})
+        c = self.cand(a)
+        self.assertEqual((c["status"], c["message_id"]), ("approved", None))
+        with db_cursor() as cur:
+            cur.execute("SELECT count(*) FROM messages WHERE id = %s", (mid,))
+            self.assertEqual(cur.fetchone()[0], 0)
+        # Not given any more → a second undo is refused.
+        self.assertNotEqual(self.api("POST", f"/candidates/{a}/ungive", "admin")[1]["status"], "success")
+        # Give again works after the undo.
+        self.assertEqual(give(a, "2025-12-21")["status"], "success")
+
+        # A give that linked to an existing archive row: undo keeps that row.
+        text = "આ પાઠ પહેલેથી આર્કાઇવમાં હતો જ"
+        with db_cursor() as cur:
+            cur.execute("INSERT INTO messages (message_text, message_date) VALUES (%s, '2024-12-22') RETURNING id",
+                        (text + ".",))
+            existing = cur.fetchone()[0]
+        b = approved(text)
+        self.assertEqual(int(give(b, "2025-12-22")["data"]["message_id"]), existing)
+        self.assertEqual(self.api("POST", f"/candidates/{b}/ungive", "admin")[1]["data"], {"archive_removed": False})
+        with db_cursor() as cur:
+            cur.execute("SELECT count(*) FROM messages WHERE id = %s", (existing,))
+            self.assertEqual(cur.fetchone()[0], 1)
+
+    def test_10f_undo_approve_and_reject(self):
+        with db_cursor() as cur:
+            cur.execute("""INSERT INTO candidates (text, match_key, status, verdict, check_state)
+                           VALUES ('પાછું વાળવાનું ઉદાહરણ વાક્ય', 'z', 'approved', 'new', 'done') RETURNING id""")
+            cid = cur.fetchone()[0]
+        st = lambda role, status, note=None: self.api("POST", f"/candidates/{cid}/status", role,
+                                                      json={"status": status, "note": note})[1]
+        self.assertNotEqual(st("editor", "shortlisted")["status"], "success")  # only an admin undoes
+        self.assertEqual(st("admin", "shortlisted", "Approval undone")["status"], "success")
+        self.assertEqual(st("admin", "rejected", "duplicate idea")["status"], "success")
+        self.assertEqual(st("admin", "pending", "Rejection undone")["status"], "success")
+        self.assertEqual(self.cand(cid)["status"], "pending")
+
     def test_11_background_thread(self):
         import time
 

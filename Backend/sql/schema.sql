@@ -277,3 +277,6 @@ CREATE INDEX IF NOT EXISTS ix_candidate_matches_candidate ON candidate_matches (
 -- Season plan: at most one path per day (approved = planned, given = done).
 CREATE UNIQUE INDEX IF NOT EXISTS ux_candidates_plan_date ON candidates (plan_date)
     WHERE plan_date IS NOT NULL AND status IN ('approved', 'given');
+-- True when Mark as given inserted the archive row (rather than linking to one
+-- that already existed): only then may Undo remove it again.
+ALTER TABLE candidates ADD COLUMN IF NOT EXISTS given_created_message boolean NOT NULL DEFAULT false;
