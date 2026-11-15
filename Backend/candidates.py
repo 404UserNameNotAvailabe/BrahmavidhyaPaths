@@ -141,7 +141,7 @@ def run_check(candidate_id: int) -> str:
         return "deleted"
     text, sheet_topics, topics_now, confirmed, emb_text = row
     a = assess(text, list(sheet_topics), list(topics_now), confirmed, emb_text)
-    return _save(candidate_id, text, a.verdict, a.reason, a.matches, a.ai_topics, a.topics,
+    return save_result(candidate_id, text, a.verdict, a.reason, a.matches, a.ai_topics, a.topics,
                  a.topics_confirmed, a.vector, a.model)
 
 
@@ -223,7 +223,7 @@ def _match_row(mid, word: cr.WordResult, sim, judge_label, judge_reason) -> dict
     }
 
 
-def _save(cid, checked_text, verdict, reason, kept, ai_topics, topics, confirmed, vec, model) -> str:
+def save_result(cid, checked_text, verdict, reason, kept, ai_topics, topics, confirmed, vec, model) -> str:
     """Store the result in one transaction — only if the row is still the one
     we checked (still running, same text). Otherwise discard: it was edited
     or re-queued and will be checked again."""

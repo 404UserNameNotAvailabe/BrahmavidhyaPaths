@@ -8,9 +8,12 @@ calls a model: AI work happens in candidate_worker.
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+import time
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends
+from starlette.concurrency import run_in_threadpool
 
 import audit
 import auth
@@ -24,6 +27,8 @@ from database import db_cursor, db_transaction
 from models import (
     CandidateGiveRequest,
     CandidateImportRequest,
+    CandidateRow,
+    CheckRequest,
     CandidateStatusRequest,
     CandidateUpdateRequest,
     PlanRequest,
@@ -36,6 +41,8 @@ logger = logging.getLogger("brahmavidya.candidates_api")
 router = APIRouter()
 
 RESULTS = ("given", "same", "similar", "new")
+# Collection name for paths added one at a time from the Check page.
+CHECK_PAGE_COLLECTION = "Added from Check"
 STATUSES = ("pending", "shortlisted", "approved", "rejected", "given")
 # Who may move a candidate INTO each status (given only via /give).
 STATUS_ROLE = {"pending": "editor", "shortlisted": "editor", "approved": "admin", "rejected": "admin"}
@@ -194,6 +201,27 @@ def _analyse(rows, topic_names: list[str]) -> tuple[list[dict], dict]:
     return out, summary
 
 
+def _insert(cur, a: dict, collection: str, username: str, check_state: str = "queued") -> int | None:
+    """Insert one analysed row; None if the same text is already in the pool.
+    A row already given (word rules) is saved as rejected with its date, so
+    nobody proposes it again."""
+    given = a["archive"] and a["archive"]["kind"] in ("exact", "contained")
+    status, note = ("rejected", f"Given on {a['archive']['date']}") if given else ("pending", None)
+    cur.execute(
+        """INSERT INTO candidates
+             (text, match_key, lang, topics, sheet_topics, ref, collection, sheet_row,
+              status, status_note, status_by, status_at, created_by, check_state)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                   CASE WHEN %s THEN now() END, %s, %s)
+           ON CONFLICT (normalized_text) DO NOTHING RETURNING id""",
+        (a["text"], cr.match_key(a["text"]), a["lang"], a["topics"], a["topics"], a["ref"],
+         collection, a["sheet_row"], status, note, "import" if given else None, bool(given),
+         username, check_state),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 @router.post("/candidates/preview")
 async def preview_candidates(payload: CandidateImportRequest, user: dict = Depends(auth.require_editor)):
     try:
@@ -223,21 +251,8 @@ async def import_candidates(payload: CandidateImportRequest, user: dict = Depend
             if a["in_pool"]:  # same text (or same words, spacing aside) already in the pool
                 skipped += 1
                 continue
-            given = a["archive"] and a["archive"]["kind"] in ("exact", "contained")
-            status, note = ("rejected", f"Given on {a['archive']['date']}") if given else ("pending", None)
             try:
-                cur.execute(
-                    """INSERT INTO candidates
-                         (text, match_key, lang, topics, sheet_topics, ref, collection, sheet_row,
-                          status, status_note, status_by, status_at, created_by)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                               CASE WHEN %s THEN now() END, %s)
-                       ON CONFLICT (normalized_text) DO NOTHING RETURNING id""",
-                    (a["text"], cr.match_key(a["text"]), a["lang"], a["topics"], a["topics"], a["ref"],
-                     collection, a["sheet_row"], status, note, "import" if given else None, bool(given),
-                     user["username"]),
-                )
-                if cur.fetchone() is None:
+                if _insert(cur, a, collection, user["username"]) is None:
                     skipped += 1
                 else:
                     added += 1
@@ -251,6 +266,116 @@ async def import_candidates(payload: CandidateImportRequest, user: dict = Depend
     candidate_worker.wake()
     audit.record(user["username"], "candidate.import", f"{collection}: added={added} skipped={skipped} errors={len(errors)}")
     return {"status": "success", "data": {"added": added, "skipped": skipped, "errors": errors}}
+
+
+# --- one path, from the Check page -------------------------------------------
+#
+# The Check page runs exactly the check a candidate gets (cands.assess), so the
+# two pages can never disagree. The result is kept for an hour: "Add to
+# Candidates" then saves that same result instead of asking the AI again.
+
+_CHECKED: dict[str, tuple[float, str, cands.Assessment]] = {}
+_CHECKED_TTL = 3600.0
+_CHECKED_MAX = 200
+
+
+def _pool_row(text: str) -> dict | None:
+    """The pool row with this text (same words, punctuation and spacing aside)."""
+    with db_cursor() as cur:
+        cur.execute(
+            """SELECT id, verdict, status, check_state FROM candidates
+               WHERE normalized_text = %s OR match_key = %s ORDER BY id LIMIT 1""",
+            (matching.normalize_text(text), cr.match_key(text)),
+        )
+        r = cur.fetchone()
+    return {"id": str(r[0]), "verdict": r[1], "status": r[2], "check_state": r[3]} if r else None
+
+
+def _remember(text: str, a: cands.Assessment) -> None:
+    now = time.monotonic()
+    for k in [k for k, (t, _, _) in _CHECKED.items() if now - t > _CHECKED_TTL]:
+        del _CHECKED[k]
+    if len(_CHECKED) >= _CHECKED_MAX:
+        del _CHECKED[min(_CHECKED, key=lambda k: _CHECKED[k][0])]
+    _CHECKED[cr.match_key(text)] = (now, text, a)
+
+
+def _recalled(text: str) -> cands.Assessment | None:
+    hit = _CHECKED.get(cr.match_key(text))
+    if hit and hit[1] == text and time.monotonic() - hit[0] <= _CHECKED_TTL:
+        return hit[2]
+    return None
+
+
+@router.post("/candidates/check")
+async def check_one(payload: CheckRequest, user: dict = Depends(auth.get_current_user)):
+    """The full candidate check for one text, without saving it. A text
+    already in the pool is not checked again: its row is returned instead."""
+    text = payload.text.strip()
+    try:
+        pooled = _pool_row(text)
+        if pooled:
+            return {"status": "success", "data": {"in_pool": pooled}}
+        if candidate_worker.used_today() >= candidate_worker.DAILY_LIMIT:
+            return {"status": "error", "message": "Today's AI check limit is reached. Try again tomorrow."}
+        a = await run_in_threadpool(cands.assess, text, [], [], False)
+    except cands.CheckFailed as exc:
+        return {"status": "error", "message": str(exc)}
+    except Exception:
+        return fail()
+    _remember(text, a)
+    if a.model:
+        audit.record(user["username"], "candidate.ai_check", text[:80])
+    ids = [m["message_id"] for m in a.matches]
+    try:
+        with db_cursor() as cur:
+            cur.execute(
+                "SELECT id, message_date, season, link, message_text FROM messages WHERE id = ANY(%s)", (ids,)
+            )
+            msgs = {r[0]: r for r in cur.fetchall()}
+    except Exception:
+        return fail()
+    rows = [(*msgs[m["message_id"]], m["word_kind"], m["overlap_pct"], m["shared_phrase_words"],
+             m["judge"], m["judge_reason"]) for m in a.matches if m["message_id"] in msgs]
+    return {
+        "status": "success",
+        "data": {
+            "in_pool": None, "verdict": a.verdict, "verdict_reason": a.reason,
+            "topics": a.ai_topics or [], "matches": _render_matches(text, rows),
+        },
+    }
+
+
+@router.post("/candidates/add")
+async def add_one(payload: CheckRequest, user: dict = Depends(auth.require_editor)):
+    """Put one checked text into the pool. Reuses the Check page's result when
+    it is for this exact text; otherwise the worker checks it."""
+    text = payload.text.strip()
+    try:
+        pooled = _pool_row(text)
+        if pooled:
+            return {"status": "success", "data": {"id": pooled["id"], "existed": True}}
+        a_row = _analyse([CandidateRow(text=text)], cands.active_topics())[0][0]
+        if a_row["errors"]:
+            return {"status": "error", "message": "; ".join(a_row["errors"])}
+        checked = _recalled(text)
+        with db_cursor() as cur:
+            cid = _insert(cur, a_row, CHECK_PAGE_COLLECTION, user["username"],
+                          "running" if checked else "queued")
+        if cid is None:  # added by someone else a moment ago
+            pooled = _pool_row(text)
+            return {"status": "success", "data": {"id": pooled["id"] if pooled else None, "existed": True}}
+        if checked:
+            saved = cands.save_result(cid, text, checked.verdict, checked.reason, checked.matches, checked.ai_topics,
+                                checked.topics, checked.topics_confirmed, checked.vector, checked.model)
+            if saved == "stale":
+                cands.queue([cid])
+        cands.refresh_repeats()
+    except Exception:
+        return fail()
+    candidate_worker.wake()
+    audit.record(user["username"], "candidate.add", f"{cid}: {text[:80]}")
+    return {"status": "success", "data": {"id": str(cid), "existed": False}}
 
 
 # --- list + detail ----------------------------------------------------------
@@ -357,6 +482,27 @@ async def list_candidates(
     }
 
 
+def _render_matches(text: str, rows) -> list[dict]:
+    """rows: (message_id, date, season, link, message_text, word_kind,
+    overlap_pct, shared_phrase_words, judge, judge_reason), in rank order."""
+    tokens = matching.tokenize(text)
+    return [
+        {
+            "message_id": str(m[0]),
+            "date": m[1].isoformat() if m[1] else None,
+            "season": m[2],
+            "link": m[3] or "",
+            "snippet_html": matching.highlight_overlap(m[4], tokens & matching.tokenize(m[4])),
+            "word_kind": m[5],
+            "overlap_pct": m[6],
+            "shared_phrase_words": m[7],
+            "judge": m[8],
+            "judge_reason": m[9],
+        }
+        for m in rows
+    ]
+
+
 @router.get("/candidates/{candidate_id}")
 async def get_candidate(candidate_id: int, user: dict = Depends(auth.get_current_user)):
     try:
@@ -401,22 +547,7 @@ async def get_candidate(candidate_id: int, user: dict = Depends(auth.get_current
     except Exception:
         return fail()
 
-    cand_tokens = matching.tokenize(c[1])
-    matches = [
-        {
-            "message_id": str(m[0]),
-            "date": m[1].isoformat() if m[1] else None,
-            "season": m[2],
-            "link": m[3] or "",
-            "snippet_html": matching.highlight_overlap(m[4], cand_tokens & matching.tokenize(m[4])),
-            "word_kind": m[5],
-            "overlap_pct": m[6],
-            "shared_phrase_words": m[7],
-            "judge": m[8],
-            "judge_reason": m[9],
-        }
-        for m in match_rows
-    ]
+    matches = _render_matches(c[1], match_rows)
     return {
         "status": "success",
         "data": {
@@ -534,6 +665,9 @@ async def set_candidate_status(candidate_id: int, payload: CandidateStatusReques
 async def give_candidate(candidate_id: int, payload: CandidateGiveRequest, user: dict = Depends(auth.require_editor)):
     """Promote an approved candidate into the archive in one transaction. If
     the text already exists there, link to that row instead of failing."""
+    # Nothing about a future day is written down (leak risk): only after the day.
+    if payload.message_date > datetime.now(ZoneInfo("Asia/Kolkata")).date():
+        return {"status": "error", "message": "That day hasn't come yet. Mark a path as given only after its day."}
     try:
         with db_transaction() as cur:
             cur.execute("SELECT status, text, topics FROM candidates WHERE id = %s FOR UPDATE", (candidate_id,))

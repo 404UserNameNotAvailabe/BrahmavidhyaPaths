@@ -10,6 +10,7 @@ The AI is faked: no network calls. Run from Backend/ with the venv:
 """
 
 import csv
+from datetime import date
 import hashlib
 import os
 import subprocess
@@ -257,13 +258,18 @@ class Integration(unittest.TestCase):
 
     def test_06_give_and_duplicate_link(self):
         cid = self.find(self.t_new)
+        # A future day is refused: nothing is written down before the day (leak risk).
+        future = f"{date.today().year + 1}-12-20"
+        _, body = self.api("POST", f"/candidates/{cid}/give", "editor",
+                           json={"message_date": future, "link": "https://www.baps.org/x.jpg"})
+        self.assertIn("hasn't come yet", body["message"])
         code, body = self.api("POST", f"/candidates/{cid}/give", "editor",
-                              json={"message_date": "2026-12-16", "link": "https://www.baps.org/x.jpg"})
+                              json={"message_date": "2025-12-16", "link": "https://www.baps.org/x.jpg"})
         self.assertEqual(body["status"], "success", body)
         mid = int(body["data"]["message_id"])
         with db_cursor() as cur:
             cur.execute("SELECT message_text, tags, tags_reviewed, season FROM messages WHERE id = %s", (mid,))
-            self.assertEqual(cur.fetchone(), (self.t_new, ["સમજણ"], True, 2026))
+            self.assertEqual(cur.fetchone(), (self.t_new, ["સમજણ"], True, 2025))
         self.assertEqual(self.cand(cid)["status"], "given")
         # Bad date window
         _, body = self.api("POST", f"/candidates/{self.find(self.t_same)}/give", "editor",
@@ -277,7 +283,7 @@ class Integration(unittest.TestCase):
                         (self.t_same + ".",))
             existing = cur.fetchone()[0]
         _, body = self.api("POST", f"/candidates/{sid}/give", "editor",
-                           json={"message_date": "2026-12-17", "link": "https://www.baps.org/y.jpg"})
+                           json={"message_date": "2025-12-17", "link": "https://www.baps.org/y.jpg"})
         self.assertEqual(int(body["data"]["message_id"]), existing)
 
     def test_07_restart_and_stale(self):
@@ -292,7 +298,7 @@ class Integration(unittest.TestCase):
         self.api("PATCH", f"/candidates/{cid}", "editor", json={"text": "આ વાક્ય હવે બદલાઈ ગયું છે"})
         self.assertEqual(self.cand(cid)["check_state"], "queued")  # the edit re-queued it
         # The worker now finishes on the OLD text: its result must be discarded.
-        self.assertEqual(candidates._save(cid, self.t_fail, "new", "x", [], [], [], False, None, None), "stale")
+        self.assertEqual(candidates.save_result(cid, self.t_fail, "new", "x", [], [], [], False, None, None), "stale")
         self.drain()
         c = self.cand(cid)
         self.assertEqual((c["check_state"], c["text"]), ("done", "આ વાક્ય હવે બદલાઈ ગયું છે"))
@@ -408,6 +414,48 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.cand(c)["plan_date"], None)
         # rejected can't be planned
         self.assertIn("Only an approved", plan(b, "2026-12-29")["message"])
+
+    def test_10c_check_page_one_path(self):
+        """Check page = the same check as the pool; Add reuses it (no 2nd AI call)."""
+        text = "સ્વભાવ ટાળવા સંતનો સંગ કરવો એ જ ઉપાય છે ખરો"
+        self.fake.topics[text] = ["સમજણ"]
+        before = len(self.fake.calls)
+        code, body = self.api("POST", "/candidates/check", "viewer", json={"text": text})
+        self.assertEqual(code, 200)
+        d = body["data"]
+        self.assertIsNone(d["in_pool"])
+        self.assertEqual((d["verdict"], d["topics"]), ("new", ["સમજણ"]))
+        self.assertEqual(len(self.fake.calls), before + 1)
+        # Viewers may check but not add.
+        self.assertEqual(self.api("POST", "/candidates/add", "viewer", json={"text": text})[0], 403)
+        code, body = self.api("POST", "/candidates/add", "editor", json={"text": text})
+        cid = body["data"]["id"]
+        self.assertFalse(body["data"]["existed"])
+        self.assertEqual(len(self.fake.calls), before + 1, "Add must reuse the Check page result")
+        c = self.cand(cid)
+        self.assertEqual((c["verdict"], c["check_state"], c["collection"], c["status"]),
+                         ("new", "done", "Added from Check", "pending"))
+        self.assertEqual(self.drain(), 0)
+        # Now in the pool: Check points at the row, Add doesn't duplicate it —
+        # also with different punctuation and spacing.
+        again = text.replace(" ", "  ") + "."
+        self.assertEqual(self.api("POST", "/candidates/check", "viewer", json={"text": again})[1]["data"]["in_pool"]["id"], cid)
+        self.assertEqual(self.api("POST", "/candidates/add", "editor", json={"text": again})[1]["data"],
+                         {"id": cid, "existed": True})
+        self.assertEqual(len(self.fake.calls), before + 1)
+
+    def test_10d_check_page_given_and_unchecked_add(self):
+        p = self.by_date["2024-01-12"]["message"]
+        given = "ખરેખર! " + p
+        body = self.api("POST", "/candidates/check", "viewer", json={"text": given})[1]["data"]
+        self.assertEqual(body["verdict"], "given")
+        self.assertEqual(body["matches"][0]["date"], "2024-01-12")
+        # Added without a fresh Check result → queued for the worker.
+        fresh = "વિશ્વાસ રાખી સેવા કરવી એ સાચી ભક્તિ ગણાય"
+        cid = self.api("POST", "/candidates/add", "editor", json={"text": fresh})[1]["data"]["id"]
+        self.assertEqual(self.cand(cid)["check_state"], "queued")
+        self.assertEqual(self.drain(), 1)
+        self.assertEqual(self.cand(cid)["check_state"], "done")
 
     def test_11_background_thread(self):
         import time
