@@ -684,6 +684,7 @@ async def give_candidate(candidate_id: int, payload: CandidateGiveRequest, user:
                 (text, payload.message_date, topics or [], taxonomy.extract_source(text), payload.link),
             )
             got = cur.fetchone()
+            created = got is not None
             if got is None:
                 cur.execute("SELECT id FROM messages WHERE normalized_text = %s", (matching.normalize_text(text),))
                 got = cur.fetchone()
@@ -692,8 +693,8 @@ async def give_candidate(candidate_id: int, payload: CandidateGiveRequest, user:
             message_id = got[0]
             cur.execute(
                 """UPDATE candidates SET status = 'given', message_id = %s, status_by = %s, status_at = now(),
-                          plan_date = %s WHERE id = %s""",
-                (message_id, user["username"], payload.message_date, candidate_id),
+                          plan_date = %s, given_created_message = %s WHERE id = %s""",
+                (message_id, user["username"], payload.message_date, created, candidate_id),
             )
     except Exception:
         return fail()
@@ -706,6 +707,52 @@ async def give_candidate(candidate_id: int, payload: CandidateGiveRequest, user:
     except Exception:
         logger.warning("requeue after give failed", exc_info=True)
     return {"status": "success", "data": {"message_id": str(message_id)}}
+
+
+@router.post("/candidates/{candidate_id}/ungive")
+async def ungive_candidate(candidate_id: int, user: dict = Depends(auth.require_admin)):
+    """Undo Mark as given (a mistake): the candidate goes back to approved. The
+    archive row goes too, but only if that give created it; a row that was
+    already in the archive is kept. Admin only, in one transaction."""
+    try:
+        with db_transaction() as cur:
+            cur.execute(
+                "SELECT status, message_id, given_created_message FROM candidates WHERE id = %s FOR UPDATE",
+                (candidate_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return {"status": "error", "message": "Candidate not found"}
+            status, message_id, created = row
+            if status != "given":
+                return {"status": "error", "message": "Only a candidate marked as given can be undone"}
+            removed, affected = False, []
+            if created and message_id is not None:
+                # Before the delete: it cascades their match rows away.
+                cur.execute("SELECT DISTINCT candidate_id FROM candidate_matches WHERE message_id = %s",
+                            (message_id,))
+                affected = [r[0] for r in cur.fetchall()]
+                cur.execute("DELETE FROM messages WHERE id = %s RETURNING id", (message_id,))
+                removed = cur.fetchone() is not None
+            cur.execute(
+                """UPDATE candidates SET status = 'approved', message_id = NULL, plan_date = NULL,
+                          given_created_message = false, status_by = %s, status_at = now(),
+                          status_note = 'Mark as given undone'
+                   WHERE id = %s""",
+                (user["username"], candidate_id),
+            )
+    except Exception:
+        return fail()
+    audit.record(user["username"], "candidate.ungive",
+                 f"id={candidate_id} message {message_id} {'removed' if removed else 'kept'}")
+    # Open candidates that were matched against the removed row need a fresh check.
+    if affected:
+        try:
+            if cands.queue(affected):
+                candidate_worker.wake()
+        except Exception:
+            logger.warning("requeue after ungive failed", exc_info=True)
+    return {"status": "success", "data": {"archive_removed": removed}}
 
 
 @router.post("/candidates/recheck")
