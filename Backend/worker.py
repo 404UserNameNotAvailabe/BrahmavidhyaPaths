@@ -66,11 +66,25 @@ def _run() -> None:
             )
             with _lock:
                 _state["done"] += 1
+            _requeue_candidates(msg_id)
             time.sleep(PACE_SECONDS)
     finally:
         return_connection(conn)
         with _lock:
             _state["running"] = False
+
+
+def _requeue_candidates(msg_id: int) -> None:
+    """A path just got its meaning vector: candidates it is now near are
+    re-checked. Best-effort; never stops the backfill."""
+    try:
+        import candidate_worker
+        import candidates
+
+        if candidates.requeue_for_archive([msg_id]):
+            candidate_worker.wake()
+    except Exception:
+        pass
 
 
 def start() -> bool:

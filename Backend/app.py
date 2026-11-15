@@ -7,6 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import audit
 import auth
+import candidate_worker
+import candidates
+import candidates_api
 import embeddings
 import matching
 import taxonomy
@@ -26,6 +29,11 @@ from models import (
 ROLES = ("viewer", "editor", "admin")
 
 
+# uvicorn configures only its own loggers; without this, INFO lines from the
+# app (e.g. "Schema ensured.", each candidate check) never reach the journal.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+for _noisy in ("httpx", "httpcore", "google_genai", "google.auth", "urllib3"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger("brahmavidya.app")
 
 SCHEMA_SQL = Path(__file__).resolve().parent / "sql" / "schema.sql"
@@ -62,12 +70,30 @@ def init_schema() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_schema()
+    try:
+        requeued = candidate_worker.reset_running()
+        if requeued:
+            logger.info("Re-queued %d candidate check(s) left running by a restart.", requeued)
+        candidate_worker.start()
+    except Exception:
+        logger.warning("Candidate worker did not start", exc_info=True)
     yield
     # Close the connection pool cleanly on shutdown.
     close_pool()
 
 
 app = FastAPI(title="Brahmavidya Path Checker", lifespan=lifespan)
+app.include_router(candidates_api.router)
+
+
+def on_archive_change(message_ids: list[int]) -> None:
+    """An archive path was added or its text changed: re-queue the open
+    candidates it could affect. Best-effort; never fails the request."""
+    try:
+        if candidates.requeue_for_archive(message_ids):
+            candidate_worker.wake()
+    except Exception:
+        logger.warning("Candidate re-queue failed", exc_info=True)
 
 app.add_middleware(
     CORSMiddleware,
@@ -285,6 +311,7 @@ async def list_archive(
     source: str | None = None,
     favorite: bool = False,
     untagged: bool = False,
+    topics_unreviewed: bool = False,
     order: str = "desc",
     limit: int = 25,
     offset: int = 0,
@@ -336,6 +363,8 @@ async def list_archive(
         clauses.append("is_favorite")
     if untagged:
         clauses.append("(tags IS NULL OR cardinality(tags) = 0)")
+    if topics_unreviewed:
+        clauses.append("(cardinality(tags) > 0 AND NOT tags_reviewed)")
 
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
@@ -347,7 +376,7 @@ async def list_archive(
             cur.execute(
                 f"""
                 SELECT id, message_text, message_date, year, link, tags,
-                       (embedding IS NULL) AS pending, source, is_favorite, season
+                       (embedding IS NULL) AS pending, source, is_favorite, season, tags_reviewed
                 FROM messages
                 {where}
                 ORDER BY message_date {direction} NULLS LAST, id {direction}
@@ -384,6 +413,7 @@ async def list_archive(
             "source": r[7] or "",
             "is_favorite": bool(r[8]),
             "season": r[9],
+            "tags_reviewed": bool(r[10]),
         }
         for r in rows
     ]
@@ -567,6 +597,7 @@ async def add_path(payload: AddRequest, user: dict = Depends(auth.require_editor
         if row is None:
             return {"status": "error", "message": "Message already exists"}
 
+        on_archive_change([row[0]])
         return {"status": "success", "message": "Message added successfully", "id": row[0]}
 
     except Exception as exc:
@@ -603,8 +634,10 @@ async def update_message(
 
 
             if "tags" in provided:
+                # A person saved this row's tags: its topics are now reviewed.
                 sets.append("tags = %s")
                 params.append(taxonomy.clean_tags(payload.tags))
+                sets.append("tags_reviewed = true")
 
             if "source" in provided:
                 sets.append("source = %s")
@@ -630,6 +663,8 @@ async def update_message(
 
         if found is None:
             return {"status": "error", "message": "Message not found"}
+        if "text" in provided:
+            on_archive_change([message_id])
         return {"status": "success", "message": "Message updated", "id": message_id}
     except Exception as exc:
         return fail()
@@ -639,12 +674,15 @@ async def update_message(
 async def delete_message(message_id: int, user: dict = Depends(auth.require_admin)):
     """Delete one message."""
     try:
+        affected = candidates.candidates_matching_message(message_id)
         with db_cursor() as cur:
             cur.execute("DELETE FROM messages WHERE id = %s RETURNING id", (message_id,))
             found = cur.fetchone()
         if found is None:
             return {"status": "error", "message": "Message not found"}
         audit.record(user["username"], "message.delete", f"id={message_id}")
+        if affected and candidates.queue(affected):
+            candidate_worker.wake()
         return {"status": "success", "message": "Message deleted", "id": message_id}
     except Exception as exc:
         return fail()
@@ -660,6 +698,7 @@ async def import_messages(payload: ImportRequest, user: dict = Depends(auth.requ
     added = 0
     skipped = 0
     errors: list[dict] = []
+    added_ids: list[int] = []
 
     with db_cursor() as cur:
         for i, row in enumerate(payload.rows):
@@ -681,15 +720,18 @@ async def import_messages(payload: ImportRequest, user: dict = Depends(auth.requ
                     """,
                     (text, row.message_date, taxonomy.clean_tags(row.tags), source, link),
                 )
-                if cur.fetchone() is None:
+                got = cur.fetchone()
+                if got is None:
                     skipped += 1
                 else:
                     added += 1
+                    added_ids.append(got[0])
             except Exception as exc:
                 logger.warning("Import row %d failed", i + 1, exc_info=True)
                 errors.append({"row": i + 1, "message": "Could not import this row"})
 
     audit.record(user["username"], "import", f"added={added} skipped={skipped}")
+    on_archive_change(added_ids)
     return {
         "status": "success",
         "data": {"added": added, "skipped": skipped, "errors": errors},
@@ -715,8 +757,17 @@ async def stats(user: dict = Depends(auth.get_current_user)):
             "pending_embeddings": pending,
             "semantic_enabled": embeddings.is_enabled(),
             "backfill": worker.status(),
+            "candidate_checks": _candidate_checks(),
         },
     }
+
+
+def _candidate_checks() -> dict | None:
+    try:
+        return candidate_worker.status()
+    except Exception:
+        logger.warning("candidate status failed", exc_info=True)
+        return None
 
 
 @app.post("/embeddings/backfill")

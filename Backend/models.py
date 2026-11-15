@@ -98,3 +98,57 @@ class UserUpdateRequest(BaseModel):
 
     role: str | None = None
     password: str | None = Field(default=None, min_length=8, max_length=200)
+
+
+# --- Candidates -------------------------------------------------------------
+
+CANDIDATE_MAX = 2000
+REF_MAX = 300
+COLLECTION_MAX = 120
+
+
+class CandidateRow(BaseModel):
+    """One sheet row for /candidates/preview and /candidates/import."""
+
+    text: str = Field(max_length=CANDIDATE_MAX)
+    topics: str | None = Field(default=None, max_length=300)  # raw Vishay cell
+    ref: str | None = Field(default=None, max_length=REF_MAX)
+    sheet_row: int | None = Field(default=None, ge=0, le=1_000_000)
+
+
+class CandidateImportRequest(BaseModel):
+    collection: str = Field(min_length=1, max_length=COLLECTION_MAX)
+    rows: list[CandidateRow] = Field(min_length=1, max_length=1000)
+
+
+class CandidateUpdateRequest(BaseModel):
+    text: str | None = Field(default=None, min_length=2, max_length=CANDIDATE_MAX)
+    topics: list[str] | None = Field(default=None, max_length=2)
+    ref: str | None = Field(default=None, max_length=REF_MAX)
+    collection: str | None = Field(default=None, max_length=COLLECTION_MAX)
+
+
+class CandidateStatusRequest(BaseModel):
+    status: str
+    note: str | None = Field(default=None, max_length=500)
+    target_season: int | None = Field(default=None, ge=2000, le=2100)
+
+
+class CandidateGiveRequest(BaseModel):
+    message_date: Annotated[date, AfterValidator(taxonomy.check_season_date)]
+    link: Annotated[str, Field(max_length=taxonomy.LINK_MAX), AfterValidator(taxonomy.clean_link)]
+
+
+class RecheckRequest(BaseModel):
+    ids: list[int] | None = Field(default=None, max_length=1000)
+    failed_only: bool = False  # re-check only rows whose last check failed
+
+
+class TopicCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+
+
+class TopicUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=60)
+    sort_order: int | None = None
+    is_active: bool | None = None

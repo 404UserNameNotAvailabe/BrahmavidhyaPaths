@@ -69,3 +69,16 @@ def db_cursor():
         yield conn.cursor()
     finally:
         return_connection(conn)
+
+
+@contextmanager
+def db_transaction():
+    """Like db_cursor, but every statement inside runs in ONE transaction:
+    committed on success, rolled back on any exception. Use it for
+    multi-statement writes (promotion, topic rename, saving a check)."""
+    conn = get_connection()
+    try:
+        with conn.transaction():
+            yield conn.cursor()
+    finally:
+        return_connection(conn)

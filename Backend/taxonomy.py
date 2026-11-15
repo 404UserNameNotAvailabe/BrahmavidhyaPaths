@@ -71,3 +71,11 @@ def clean_tags(tags: list[str] | None) -> list[str]:
             out.append(t)
     return out
 
+
+
+def upcoming_season(today: date | None = None) -> int:
+    """Start year of the season now running or next to start. Season s runs
+    16 Dec s – 14 Jan s+1, so on 10 Jan 2027 it is 2026 and on 20 Jan 2027 it
+    is 2027."""
+    today = today or date.today()
+    return today.year - 1 if (today.month, today.day) <= SEASON_END else today.year
