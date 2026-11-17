@@ -519,7 +519,7 @@ async def get_candidate(candidate_id: int, user: dict = Depends(auth.get_current
             )
             c = cur.fetchone()
             if c is None:
-                return {"status": "error", "message": "Candidate not found"}
+                return {"status": "error", "message": "Path not found"}
             cur.execute(
                 """SELECT cm.message_id, m.message_date, m.season, m.link, m.message_text, cm.word_kind,
                           cm.overlap_pct, cm.shared_phrase_words, cm.judge, cm.judge_reason
@@ -602,15 +602,15 @@ async def update_candidate(candidate_id: int, payload: CandidateUpdateRequest, u
             cur.execute("SELECT status FROM candidates WHERE id = %s FOR UPDATE", (candidate_id,))
             row = cur.fetchone()
             if row is None:
-                return {"status": "error", "message": "Candidate not found"}
+                return {"status": "error", "message": "Path not found"}
             if row[0] == "given":
-                return {"status": "error", "message": "A given candidate can no longer be edited"}
+                return {"status": "error", "message": "A given path can no longer be edited"}
             cur.execute(f"UPDATE candidates SET {', '.join(sets)} WHERE id = %s", params + [candidate_id])
             if text_changed:
                 cur.execute("DELETE FROM candidate_matches WHERE candidate_id = %s", (candidate_id,))
     except Exception as exc:
         if "ux_candidates_normalized" in str(exc):
-            return {"status": "error", "message": "That text is already in the pool"}
+            return {"status": "error", "message": "That text is already in New paths"}
         return fail()
     if text_changed:
         try:
@@ -628,20 +628,20 @@ async def set_candidate_status(candidate_id: int, payload: CandidateStatusReques
     if target not in STATUS_ROLE:
         return {"status": "error", "message": "Status must be pending, shortlisted, approved or rejected"}
     if not _has_role(user, STATUS_ROLE[target]):
-        return {"status": "error", "message": f"Only an admin can mark a candidate {target}"}
+        return {"status": "error", "message": f"Only an admin can mark a path {target}"}
     note = (payload.note or "").strip() or None
     try:
         with db_transaction() as cur:
             cur.execute("SELECT status, verdict FROM candidates WHERE id = %s FOR UPDATE", (candidate_id,))
             row = cur.fetchone()
             if row is None:
-                return {"status": "error", "message": "Candidate not found"}
+                return {"status": "error", "message": "Path not found"}
             current, verdict = row
             if current == "given":
-                return {"status": "error", "message": "This candidate has already been given"}
+                return {"status": "error", "message": "This path has already been given"}
             # Once an admin has approved or rejected it, only an admin changes it.
             if current in ("approved", "rejected") and not _has_role(user, "admin"):
-                return {"status": "error", "message": f"Only an admin can change an {current} candidate"}
+                return {"status": "error", "message": f"Only an admin can change an {current} path"}
             if target == "approved" and verdict is None:
                 return {"status": "error", "message": "Wait for the check to finish before approving"}
             if target == "approved" and verdict == "given":
@@ -675,10 +675,10 @@ async def give_candidate(candidate_id: int, payload: CandidateGiveRequest, user:
             cur.execute("SELECT status, text, topics FROM candidates WHERE id = %s FOR UPDATE", (candidate_id,))
             row = cur.fetchone()
             if row is None:
-                return {"status": "error", "message": "Candidate not found"}
+                return {"status": "error", "message": "Path not found"}
             status, text, topics = row
             if status != "approved":
-                return {"status": "error", "message": "Only an approved candidate can be marked as given"}
+                return {"status": "error", "message": "Only an approved path can be marked as given"}
             cur.execute(
                 """INSERT INTO messages (message_text, message_date, tags, tags_reviewed, source, link)
                    VALUES (%s, %s, %s, true, %s, %s)
@@ -724,10 +724,10 @@ async def ungive_candidate(candidate_id: int, user: dict = Depends(auth.require_
             )
             row = cur.fetchone()
             if row is None:
-                return {"status": "error", "message": "Candidate not found"}
+                return {"status": "error", "message": "Path not found"}
             status, message_id, created = row
             if status != "given":
-                return {"status": "error", "message": "Only a candidate marked as given can be undone"}
+                return {"status": "error", "message": "Only a path marked as given can be undone"}
             removed, affected = False, []
             if created and message_id is not None:
                 # Before the delete: it cascades their match rows away.
@@ -774,7 +774,7 @@ async def delete_candidate(candidate_id: int, user: dict = Depends(auth.require_
         cur.execute("DELETE FROM candidates WHERE id = %s RETURNING id", (candidate_id,))
         found = cur.fetchone()
     if found is None:
-        return {"status": "error", "message": "Candidate not found"}
+        return {"status": "error", "message": "Path not found"}
     audit.record(user["username"], "candidate.delete", f"id={candidate_id}")
     return {"status": "success"}
 
@@ -867,14 +867,14 @@ async def plan_candidate(candidate_id: int, payload: PlanRequest, user: dict = D
             cur.execute("SELECT status, target_season FROM candidates WHERE id = %s FOR UPDATE", (candidate_id,))
             row = cur.fetchone()
             if row is None:
-                return {"status": "error", "message": "Candidate not found"}
+                return {"status": "error", "message": "Path not found"}
             status, target = row
             if status != "approved":
-                return {"status": "error", "message": "Only an approved candidate can be planned"}
+                return {"status": "error", "message": "Only an approved path can be planned"}
             d = payload.date
             if d is not None:
                 if target and season_of(d) != target:
-                    return {"status": "error", "message": f"This candidate is approved for {target}–{str(target + 1)[2:]}"}
+                    return {"status": "error", "message": f"This path is approved for {target}–{str(target + 1)[2:]}"}
                 cur.execute("SELECT 1 FROM messages WHERE message_date = %s", (d,))
                 if cur.fetchone():
                     return {"status": "error", "message": "A path was already given on that day"}
