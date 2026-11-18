@@ -135,7 +135,7 @@ def get_current_user(authorization: str | None = Header(default=None)) -> dict:
 
 
 # Role hierarchy — higher roles include lower privileges.
-ROLES = ("viewer", "editor", "admin")
+ROLES = ("viewer", "editor", "admin", "superadmin")
 
 
 def require_role(minimum: str):
@@ -154,3 +154,4 @@ def require_role(minimum: str):
 
 require_editor = require_role("editor")  # editor or admin — curate
 require_admin = require_role("admin")  # admin only — delete / manage
+require_superadmin = require_role("superadmin")  # settings, Google Cloud, server status

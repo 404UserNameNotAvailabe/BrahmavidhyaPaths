@@ -152,9 +152,11 @@ def _vertex_generate(prompt: str) -> str:
     client = embeddings._get_client()
     if client is not None and JUDGE_LOCATION and not embeddings.GEMINI_API_KEY:
         if _judge_client is None:  # ADC client pinned to the judge's region
-            from google import genai
+            import gcp_settings
 
-            _judge_client = genai.Client(vertexai=True, project=embeddings.GEMINI_PROJECT, location=JUDGE_LOCATION)
+            _judge_client = gcp_settings.make_client(
+                {"project": embeddings.GEMINI_PROJECT, "location": JUDGE_LOCATION}
+            )
         client = _judge_client
     if client is None or not JUDGE_MODEL:
         raise JudgeError("judge model not configured")

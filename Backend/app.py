@@ -5,12 +5,14 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+import admin_api
 import audit
 import auth
 import candidate_worker
 import candidates
 import candidates_api
 import embeddings
+import gcp_settings
 import matching
 import taxonomy
 import worker
@@ -26,7 +28,8 @@ from models import (
     UserUpdateRequest,
 )
 
-ROLES = ("viewer", "editor", "admin")
+ROLES = auth.ROLES
+ADMIN_ROLES = ("admin", "superadmin")
 
 
 # uvicorn configures only its own loggers; without this, INFO lines from the
@@ -70,6 +73,7 @@ def init_schema() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_schema()
+    gcp_settings.load()  # Google Cloud settings saved from the UI override .env
     try:
         requeued = candidate_worker.reset_running()
         if requeued:
@@ -89,6 +93,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Brahmavidya Path Checker", lifespan=lifespan)
 app.include_router(candidates_api.router)
+app.include_router(admin_api.router)
 
 
 def on_archive_change(message_ids: list[int]) -> None:
@@ -206,7 +211,9 @@ async def create_user_endpoint(
     username = payload.username.strip().lower()
     role = payload.role.strip().lower()
     if role not in ROLES:
-        return {"status": "error", "message": "Role must be viewer, editor, or admin"}
+        return {"status": "error", "message": "Role must be viewer, editor, admin or superadmin"}
+    if role == "superadmin" and user["role"] != "superadmin":
+        return {"status": "error", "message": "Only a superadmin can create a superadmin"}
     try:
         with db_cursor() as cur:
             cur.execute(
@@ -236,7 +243,9 @@ async def update_user_endpoint(
     new_role = payload.role.strip().lower() if payload.role is not None else None
     if new_role is not None:
         if new_role not in ROLES:
-            return {"status": "error", "message": "Role must be viewer, editor, or admin"}
+            return {"status": "error", "message": "Role must be viewer, editor, admin or superadmin"}
+        if new_role == "superadmin" and user["role"] != "superadmin":
+            return {"status": "error", "message": "Only a superadmin can make someone superadmin"}
         sets.append("role = %s")
         params.append(new_role)
     if payload.password is not None:
@@ -250,11 +259,17 @@ async def update_user_endpoint(
         row = cur.fetchone()
         if row is None:
             return {"status": "error", "message": "User not found"}
-        # Don't let the last admin be demoted.
-        if row[0] == "admin" and new_role is not None and new_role != "admin":
-            cur.execute("SELECT count(*) FROM users WHERE role = 'admin'")
+        if row[0] == "superadmin" and user["role"] != "superadmin":
+            return {"status": "error", "message": "Only a superadmin can change a superadmin"}
+        # Don't let the last admin (or superadmin) lose the role.
+        if row[0] in ADMIN_ROLES and new_role is not None and new_role not in ADMIN_ROLES:
+            cur.execute("SELECT count(*) FROM users WHERE role IN ('admin', 'superadmin')")
             if cur.fetchone()[0] <= 1:
                 return {"status": "error", "message": "Cannot demote the last admin"}
+        if row[0] == "superadmin" and new_role is not None and new_role != "superadmin":
+            cur.execute("SELECT count(*) FROM users WHERE role = 'superadmin'")
+            if cur.fetchone()[0] <= 1:
+                return {"status": "error", "message": "Cannot demote the last superadmin"}
         params.append(user_id)
         cur.execute(f"UPDATE users SET {', '.join(sets)} WHERE id = %s", params)
     changed = "role+password" if (new_role and payload.password) else ("role" if new_role else "password")
@@ -271,10 +286,16 @@ async def delete_user_endpoint(user_id: int, user: dict = Depends(auth.require_a
         row = cur.fetchone()
         if row is None:
             return {"status": "error", "message": "User not found"}
-        if row[0] == "admin":
-            cur.execute("SELECT count(*) FROM users WHERE role = 'admin'")
+        if row[0] == "superadmin" and user["role"] != "superadmin":
+            return {"status": "error", "message": "Only a superadmin can delete a superadmin"}
+        if row[0] in ADMIN_ROLES:
+            cur.execute("SELECT count(*) FROM users WHERE role IN ('admin', 'superadmin')")
             if cur.fetchone()[0] <= 1:
                 return {"status": "error", "message": "Cannot delete the last admin"}
+        if row[0] == "superadmin":
+            cur.execute("SELECT count(*) FROM users WHERE role = 'superadmin'")
+            if cur.fetchone()[0] <= 1:
+                return {"status": "error", "message": "Cannot delete the last superadmin"}
         cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
     audit.record(user["username"], "user.delete", f"id={user_id}")
     return {"status": "success"}

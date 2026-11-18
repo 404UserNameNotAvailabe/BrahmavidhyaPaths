@@ -35,6 +35,16 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS ix_audit_at ON audit_log (at DESC);
 
+-- Settings a superadmin changes from the UI (menu visibility, Google Cloud).
+-- One JSON value per key; never holds a secret (the service-account key
+-- lives in the key file only).
+CREATE TABLE IF NOT EXISTS app_settings (
+    key         text PRIMARY KEY,
+    value       jsonb NOT NULL,
+    updated_at  timestamptz NOT NULL DEFAULT now(),
+    updated_by  text
+);
+
 CREATE TABLE IF NOT EXISTS messages (
     id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 

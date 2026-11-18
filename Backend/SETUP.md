@@ -82,6 +82,13 @@ python -m uvicorn app:app --reload   # http://localhost:8000
 | GET | `/topics` | any | — | `topics: [{id, name, sort_order, is_active, archive_count, candidate_count}]` |
 | POST | `/topics` | admin | `{name}` | `{id}` |
 | PATCH | `/topics/{id}` | admin | `{name?, sort_order?, is_active?}` (rename rewrites every tag) | — |
+| GET | `/settings/menu` | any | — | `menu: {path: [roles that see it]}, min_role: {path: role}` |
+| POST | `/settings/menu` | superadmin | `{menu: {path: [roles]}}` (roles below a page's `min_role` are dropped) | same as GET |
+| GET | `/admin/gcp` | superadmin | — | `settings, env, overridden, key {client_email, project_id, key_id, path, modified}, api_key_mode, last_test` (never the private key) |
+| POST | `/admin/gcp/test` | superadmin | `{project, location, embed_model, judge_model, judge_location, key_json?}` | `{ok, embed {ok, ms, dims}, judge {ok, ms}}`; errors are plain reasons |
+| POST | `/admin/gcp` | superadmin | same as test | tests first; saves only if it passes (key → key file, values → `app_settings`), live without restart |
+| POST | `/admin/gcp/reset` | superadmin | — | drop UI overrides, back to `.env` (key file unchanged) |
+| GET | `/admin/status` | superadmin | — | `server, worker, database, google` sections, each `{ok, …}` |
 | POST | `/candidates/preview` | editor | `{collection, rows: [{text, topics?, ref?, sheet_row?}]}` | per row `errors, archive, in_pool, repeat_of_index, doubled_word, topics` + `summary` (rules only, no AI) |
 | POST | `/candidates/import` | editor | same as preview | `{added, skipped, errors}`; already-given rows saved as rejected |
 | GET | `/candidates` | any | `verdict, topic, status, collection, q, topics_unconfirmed, order, limit≤200, offset` | `entries, total, counts, waiting, pool_total, collections` |
