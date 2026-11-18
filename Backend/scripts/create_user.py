@@ -24,9 +24,9 @@ def main() -> int:
         print("Username is required.")
         return 1
 
-    role = input("Role [admin/editor/viewer] (admin): ").strip().lower() or "admin"
-    if role not in ("admin", "editor", "viewer"):
-        print("Role must be admin, editor, or viewer.")
+    role = input("Role [superadmin/admin/editor/viewer] (admin): ").strip().lower() or "admin"
+    if role not in ("superadmin", "admin", "editor", "viewer"):
+        print("Role must be superadmin, admin, editor, or viewer.")
         return 1
 
     password = getpass.getpass("Password (min 8 chars): ")

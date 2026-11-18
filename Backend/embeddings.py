@@ -52,7 +52,9 @@ def _get_client():
 
         if use_adc:
             # ADC: credentials come from GOOGLE_APPLICATION_CREDENTIALS or workload identity.
-            _client = genai.Client(vertexai=True, project=GEMINI_PROJECT, location=GEMINI_LOCATION)
+            import gcp_settings  # explicit key file → swappable at runtime
+
+            _client = gcp_settings.make_client({"project": GEMINI_PROJECT, "location": GEMINI_LOCATION})
             logger.info("Gemini client initialised via ADC (project=%s, location=%s).", GEMINI_PROJECT, GEMINI_LOCATION)
         elif GEMINI_USE_VERTEX:
             # Vertex AI express-mode key.
